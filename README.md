@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/30490582/README.md)
 # GPT-5.6 API 检测器
 
 这个工具用一个你信任的 GPT-5.6 API，检测另一个待测 API 背后的模型是否是 GPT-5.6。
