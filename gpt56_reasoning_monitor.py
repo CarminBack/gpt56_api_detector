@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Continuously monitor GPT-5.6 encrypted-state compatibility."""
 
 from __future__ import annotations
@@ -172,6 +172,18 @@ def run_one_challenge(
             candidate, candidate_model, context_variant(output, variant), expected
         )
 
+    errors = {
+        variant: result
+        for variant, result in conditions.items()
+        if result.get("status") == "error"
+    }
+    if errors:
+        return None, {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "reason": "candidate_request_error",
+            "conditions": errors,
+        }
+
     return {
         "time": datetime.now(timezone.utc).isoformat(),
         "task": task,
@@ -326,6 +338,16 @@ def main() -> int:
                 f"verdict={summary['verdict']}",
                 flush=True,
             )
+            if failure is not None:
+                statuses = sorted(
+                    {
+                        result.get("http_status")
+                        for result in failure.get("conditions", {}).values()
+                        if result.get("http_status") is not None
+                    }
+                )
+                detail = f" HTTP={statuses}" if statuses else ""
+                print(f"Last attempt rejected: {failure['reason']}.{detail}", flush=True)
             if args.max_valid_trials and len(trials) >= args.max_valid_trials:
                 break
             delay = random_interval(args.min_interval, args.max_interval)

@@ -137,6 +137,8 @@ class ResponsesClient:
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "gpt56-api-detector/1.1",
             },
         )
         started = time.perf_counter()
@@ -399,11 +401,19 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         for trial in valid_trials
         for result in trial["candidate"].values()
     )
+    candidate_request_errors = sum(
+        result.get("status") == "error"
+        for trial in valid_trials
+        for result in trial["candidate"].values()
+    )
     required_matches = max(args.min_matches, math.ceil(args.min_match_rate * args.trials))
 
     if valid_count < args.trials:
         verdict = "inconclusive"
         reason = "trusted endpoint did not produce enough self-verifiable challenge states"
+    elif candidate_request_errors:
+        verdict = "inconclusive"
+        reason = "one or more candidate requests failed before a usable model response was received"
     elif plaintext_leaks:
         verdict = "invalid"
         reason = "one or more candidate requests contained challenge plaintext"
@@ -453,6 +463,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "candidate_message_only_exact": message_exact,
             "candidate_corrupted_ciphertext_exact": corrupt_exact,
             "candidate_request_plaintext_leaks": plaintext_leaks,
+            "candidate_request_errors": candidate_request_errors,
             "blind_guess_upper_tail_full": f"{blind_guess_tail_probability(full_exact, valid_count):.3e}",
             "blind_guess_upper_tail_without_ids": f"{blind_guess_tail_probability(no_id_exact, valid_count):.3e}",
         },
