@@ -44,7 +44,7 @@ def main() -> int:
     print("=" * 62)
     print("GPT-5.6 API 检测器")
     print("用可信 GPT-5.6 API 检测另一个 API 的模型是否是 GPT-5.6。")
-    print("检测固定运行 20 个有效挑战，并使用严格通过标准。")
+    print("检测固定运行 20 个候选挑战；错误与重试不会从分母删除。")
     print("API key 输入时不会显示，也不会写入报告。")
     print("=" * 62)
 
@@ -76,6 +76,9 @@ def main() -> int:
         "--trials", str(TRIALS),
         "--min-match-rate", str(MIN_MATCH_RATE),
         "--min-matches", str(MIN_MATCHES),
+        "--candidate-retries", "2",
+        "--candidate-min-gap", "2",
+        "--candidate-max-gap", "5",
         "--output", str(report_path),
     ]
 
@@ -84,7 +87,7 @@ def main() -> int:
     child_env["TRUSTED_API_KEY"] = trusted_key
     child_env["CANDIDATE_API_KEY"] = candidate_key
 
-    print("\n开始严格检测。目标：20 个有效挑战。")
+    print("\n开始严格检测。目标：20 个候选挑战。")
     print("这可能需要几分钟，请不要关闭窗口。\n")
     try:
         try:

@@ -55,6 +55,7 @@ RECALL_PROMPT = (
 )
 
 KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]{12,}")
+TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
 
 
 def sha256(value: str) -> str:
@@ -99,6 +100,12 @@ def random_ten_digits() -> str:
     middle = "".join(str(secrets.randbelow(10)) for _ in range(8))
     last = str(secrets.randbelow(9) + 1)
     return first + middle + last
+
+
+def random_float(minimum: float, maximum: float) -> float:
+    if maximum <= minimum:
+        return minimum
+    return minimum + (maximum - minimum) * (secrets.randbelow(1_000_001) / 1_000_000)
 
 
 def transform(task: str, value: str) -> str:
@@ -239,6 +246,9 @@ def call_and_score(
     model: str,
     context: list[Any],
     expected: str,
+    *,
+    max_transport_attempts: int = 1,
+    retry_base_seconds: float = 2.0,
 ) -> dict[str, Any]:
     payload = recall_payload(model, context)
     serialized = json.dumps(redact(payload), ensure_ascii=False)
@@ -250,28 +260,48 @@ def call_and_score(
             "plaintext_leak": True,
             "error": "expected value appeared in candidate request plaintext",
         }
-    try:
-        response, meta = client.post(payload)
-        answer = output_text(response)
-        return {
-            "status": "ok",
-            "exact": answer == expected,
-            "unknown": answer == "UNKNOWN",
-            "answer_sha256": sha256(answer),
-            "answer_length": len(answer),
-            "plaintext_leak": False,
-            **meta,
-        }
-    except ProbeError as exc:
-        return {
-            "status": "error",
-            "exact": False,
-            "plaintext_leak": False,
-            "http_status": exc.status,
-            "elapsed_ms": exc.elapsed_ms,
-            "error": redact(str(exc)),
-        }
 
+    last_error: ProbeError | None = None
+    transport_errors: list[dict[str, Any]] = []
+    for transport_attempt in range(1, max_transport_attempts + 1):
+        try:
+            response, meta = client.post(payload)
+            answer = output_text(response)
+            return {
+                "status": "ok",
+                "exact": answer == expected,
+                "unknown": answer == "UNKNOWN",
+                "answer_sha256": sha256(answer),
+                "answer_length": len(answer),
+                "plaintext_leak": False,
+                "transport_attempts": transport_attempt,
+                "transport_errors": transport_errors,
+                **meta,
+            }
+        except ProbeError as exc:
+            last_error = exc
+            transport_errors.append({
+                "http_status": exc.status,
+                "elapsed_ms": exc.elapsed_ms,
+                "error": redact(str(exc)),
+            })
+            transient = exc.status is None or exc.status in TRANSIENT_HTTP_STATUSES
+            if transport_attempt >= max_transport_attempts or not transient:
+                break
+            backoff = retry_base_seconds * (2 ** (transport_attempt - 1))
+            time.sleep(backoff + secrets.randbelow(1001) / 1000)
+
+    assert last_error is not None
+    return {
+        "status": "error",
+        "exact": False,
+        "plaintext_leak": False,
+        "http_status": last_error.status,
+        "elapsed_ms": last_error.elapsed_ms,
+        "transport_attempts": transport_attempt,
+        "transport_errors": transport_errors,
+        "error": redact(str(last_error)),
+    }
 
 def blind_guess_tail_probability(successes: int, trials: int) -> float:
     if successes <= 0:
@@ -360,13 +390,17 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             continue
 
         conditions = {}
-        for variant in ("full", "without_ids", "message_only", "corrupted_ciphertext"):
+        variants = ("full", "without_ids", "message_only", "corrupted_ciphertext")
+        for index, variant in enumerate(variants):
             conditions[variant] = call_and_score(
                 candidate,
                 args.candidate_model,
                 context_variant(output, variant),
                 expected,
+                max_transport_attempts=args.candidate_retries + 1,
             )
+            if index + 1 < len(variants):
+                time.sleep(random_float(args.candidate_min_gap, args.candidate_max_gap))
         valid_trials.append(
             {
                 "trial": len(valid_trials) + 1,
@@ -406,14 +440,22 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         for trial in valid_trials
         for result in trial["candidate"].values()
     )
+    candidate_error_rounds = sum(
+        any(result.get("status") == "error" for result in trial["candidate"].values())
+        for trial in valid_trials
+    )
+    candidate_retry_rounds = sum(
+        any(result.get("transport_attempts", 1) > 1 for result in trial["candidate"].values())
+        for trial in valid_trials
+    )
     required_matches = max(args.min_matches, math.ceil(args.min_match_rate * args.trials))
 
     if valid_count < args.trials:
         verdict = "inconclusive"
         reason = "trusted endpoint did not produce enough self-verifiable challenge states"
-    elif candidate_request_errors:
+    elif candidate_error_rounds or candidate_retry_rounds:
         verdict = "inconclusive"
-        reason = "one or more candidate requests failed before a usable model response was received"
+        reason = "candidate transport was not stable for every challenge in the verdict denominator"
     elif plaintext_leaks:
         verdict = "invalid"
         reason = "one or more candidate requests contained challenge plaintext"
@@ -434,7 +476,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         reason = "partial replay evidence did not reach the configured threshold"
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "verdict": verdict,
         "reason": reason,
@@ -452,6 +494,10 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "required_matches_per_positive_condition": required_matches,
             "min_match_rate": args.min_match_rate,
             "min_matches": args.min_matches,
+            "candidate_transient_retries": args.candidate_retries,
+            "candidate_request_gap_seconds": [args.candidate_min_gap, args.candidate_max_gap],
+            "candidate_errors_remain_in_verdict_denominator": True,
+            "candidate_retry_round_blocks_passing": True,
             "keys_persisted": False,
             "raw_ciphertext_persisted": False,
         },
@@ -464,6 +510,8 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "candidate_corrupted_ciphertext_exact": corrupt_exact,
             "candidate_request_plaintext_leaks": plaintext_leaks,
             "candidate_request_errors": candidate_request_errors,
+            "candidate_error_rounds": candidate_error_rounds,
+            "candidate_retry_rounds": candidate_retry_rounds,
             "blind_guess_upper_tail_full": f"{blind_guess_tail_probability(full_exact, valid_count):.3e}",
             "blind_guess_upper_tail_without_ids": f"{blind_guess_tail_probability(no_id_exact, valid_count):.3e}",
         },
@@ -511,6 +559,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-attempts", type=int)
     parser.add_argument("--min-match-rate", type=float, default=0.5)
     parser.add_argument("--min-matches", type=int, default=4)
+    parser.add_argument("--candidate-retries", type=int, default=2)
+    parser.add_argument("--candidate-min-gap", type=float, default=2.0)
+    parser.add_argument("--candidate-max-gap", type=float, default=5.0)
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--output", type=Path, default=Path("gpt56_probe_report.json"))
     parser.add_argument("--self-test", action="store_true")
@@ -525,6 +576,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--min-matches must be at least 3")
     if not 0 < args.min_match_rate <= 1:
         parser.error("--min-match-rate must be in (0, 1]")
+    if not 0 <= args.candidate_retries <= 5:
+        parser.error("--candidate-retries must be between 0 and 5")
+    if args.candidate_min_gap < 0 or args.candidate_max_gap < args.candidate_min_gap:
+        parser.error("candidate gaps must satisfy 0 <= min <= max")
     return args
 
 

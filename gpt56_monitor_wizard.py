@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """GPT-5.6 持续路由监控的一键交互启动器。"""
 
 from __future__ import annotations
@@ -47,8 +47,8 @@ def ask_secret(prompt: str) -> str:
 def main() -> int:
     print("=" * 66)
     print("GPT-5.6 持续路由监控")
-    print("程序会使用随机时间和随机措辞持续检测，按 Ctrl+C 停止。")
-    print("严格标准固定为最近 20 个有效挑战至少通过 15 个。")
+    print("程序会使用稳定提示、随机时间和随机请求顺序持续检测，按 Ctrl+C 停止。")
+    print("严格标准固定为最近 20 个候选尝试至少命中 15 个，错误和重试不能通过。")
     print("=" * 66)
 
     print("\n[1/3] 可信 GPT-5.6 API")
@@ -83,6 +83,9 @@ def main() -> int:
         "--max-interval", str(maximum),
         "--window", "20",
         "--required-matches", "15",
+        "--candidate-retries", "2",
+        "--candidate-min-gap", "2",
+        "--candidate-max-gap", "5",
         "--output", str(report),
     ]
     child_env = os.environ.copy()
