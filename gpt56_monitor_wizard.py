@@ -46,9 +46,9 @@ def ask_secret(prompt: str) -> str:
 
 def main() -> int:
     print("=" * 66)
-    print("GPT-5.6 持续路由监控")
-    print("程序会使用稳定提示、随机时间和随机请求顺序持续检测，按 Ctrl+C 停止。")
-    print("严格标准固定为最近 20 个候选尝试至少命中 15 个，错误和重试不能通过。")
+    print("GPT-5.6 综合持续监控 v3.1")
+    print("程序会同时监控加密状态能力、具体型号指纹和混用情况，按 Ctrl+C 停止。")
+    print("高档 juice 一旦出现互斥型号值，会立即并持续标记混用。")
     print("=" * 66)
 
     print("\n[1/3] 可信 GPT-5.6 API")

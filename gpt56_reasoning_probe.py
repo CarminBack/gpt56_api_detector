@@ -21,6 +21,16 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from gpt56_juice_probe import (
+    EFFORTS,
+    EFFORT_LABELS_CN,
+    MODEL_LABELS_CN,
+    classify_visible_answer,
+    combined_summary,
+    matching_models,
+    run_juice_request,
+    summarize_juice,
+)
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -312,14 +322,159 @@ def blind_guess_tail_probability(successes: int, trials: int) -> float:
         for count in range(successes, trials + 1)
     )
 
+def encrypted_state_verdict(
+    *,
+    attempts: int,
+    required_attempts: int,
+    full_exact: int,
+    without_ids_exact: int,
+    required_matches: int,
+    message_only_exact: int,
+    corrupted_ciphertext_exact: int,
+    plaintext_leaks: int,
+    warming_verdict: str = "inconclusive",
+    incompatible_verdict: str = "not_compatible_in_this_probe",
+) -> tuple[str, str]:
+    """Judge model capability independently from transport quality."""
+    if attempts < required_attempts:
+        return warming_verdict, "not enough candidate attempts"
+    if plaintext_leaks:
+        return "invalid", "one or more candidate requests contained challenge plaintext"
+    if message_only_exact or corrupted_ciphertext_exact:
+        return "suspicious", "a negative control unexpectedly matched the hidden challenge"
+    if full_exact >= required_matches and without_ids_exact >= required_matches:
+        return (
+            "gpt_5_6_encrypted_state_compatible",
+            "candidate repeatedly recovered trusted GPT-5.6 hidden values from encrypted state",
+        )
+    if full_exact == 0 and without_ids_exact == 0:
+        return incompatible_verdict, "candidate recovered none of the trusted encrypted challenge states"
+    return "inconclusive", "partial replay evidence did not reach the configured threshold"
 
+
+def connection_quality(error_rounds: int, retry_rounds: int) -> dict[str, Any]:
+    if error_rounds:
+        return {
+            "status": "unstable",
+            "title_cn": "不稳定",
+            "detail_cn": f"{error_rounds} 轮最终失败，{retry_rounds} 轮发生过重试",
+        }
+    if retry_rounds:
+        return {
+            "status": "intermittent",
+            "title_cn": "偶有波动",
+            "detail_cn": f"没有最终失败，{retry_rounds} 轮重试后恢复",
+        }
+    return {
+        "status": "smooth",
+        "title_cn": "流畅",
+        "detail_cn": "没有最终失败，也没有发生重试",
+    }
+
+TASK_LABELS_CN = {
+    "reverse": "十位数字倒序",
+    "rotate_left_3": "前三位移到末尾",
+    "complement_9": "逐位计算九补数",
+}
+
+VERDICT_LABELS_CN = {
+    "gpt_5_6_encrypted_state_compatible": ("检测通过", "是"),
+    "not_compatible_in_this_probe": ("当前检测未观察到兼容能力", "否"),
+    "inconclusive": ("证据不足或网络不稳定", "尚不能确认"),
+    "suspicious": ("阴性对照异常，结果不可信", "否"),
+    "invalid": ("检测发生明文泄漏，结果无效", "否"),
+}
+
+
+def print_candidate_attempt_result(trial: dict[str, Any]) -> None:
+    candidate = trial["candidate"]
+    retries = sum(
+        len(result.get("transport_errors", [])) for result in candidate.values()
+    )
+    errors = sum(result.get("status") == "error" for result in candidate.values())
+    negative = int(bool(candidate["message_only"].get("exact"))) + int(
+        bool(candidate["corrupted_ciphertext"].get("exact"))
+    )
+    network = "正常" if not errors and not retries else f"失败 {errors} 个，重试 {retries} 次"
+    print(
+        "本轮结果："
+        f"完整状态{'答对' if candidate['full'].get('exact') else '未答对'}，"
+        f"去掉编号后{'答对' if candidate['without_ids'].get('exact') else '未答对'}，"
+        f"异常测试{'正常' if negative == 0 else '命中'}，线路{network}"
+    )
+
+
+def print_probe_summary(report: dict[str, Any], report_path: Path) -> None:
+    summary = report["summary"]
+    verdict = report["verdict"]
+    combined = report["combined_summary"]
+    juice = report.get("juice_summary")
+    requested = report["configuration"]["requested_candidate_attempts"]
+    attempts = summary["candidate_attempts"]
+    required = report["configuration"]["required_matches_per_positive_condition"]
+    negative = (
+        summary["candidate_message_only_exact"]
+        + summary["candidate_corrupted_ciphertext_exact"]
+    )
+    network = report["network_summary"]
+    confidence_cn = {
+        "high": "高", "medium": "中", "preliminary": "初步", "insufficient": "不足"
+    }
+
+    print("\n" + "=" * 62)
+    print(f"检测完成：{combined['title_cn']}（是否通过：{combined['passed_cn']}）")
+    print(f"综合结论：{combined['explanation_cn']}")
+    if verdict == "gpt_5_6_encrypted_state_compatible":
+        strong_text = "通过，极高置信度具备 GPT-5.6 加密状态处理能力"
+    else:
+        strong_text = VERDICT_LABELS_CN.get(verdict, (verdict, ""))[0]
+    print(
+        f"模型能力：{strong_text}；"
+        f"两种有效测试 {summary['candidate_full_exact']}/{required}、"
+        f"{summary['candidate_without_ids_exact']}/{required}"
+    )
+    print(
+        f"防误判检查：异常命中 {negative}，答案泄漏 "
+        f"{summary['candidate_request_plaintext_leaks']}（都必须为 0）"
+    )
+    if juice is not None:
+        mixed_cn = "已发现" if juice["status"] == "mixed_or_inconsistent" else "未发现"
+        print(
+            f"具体型号：{juice['likely_model_cn']}（置信度"
+            f"{confidence_cn.get(juice['confidence'], juice['confidence'])}，"
+            f"高档样本 {juice['high_numeric_samples']}/{juice['required_high_samples']}，"
+            f"混用{mixed_cn}）"
+        )
+        if juice["status"] == "mixed_or_inconsistent":
+            labels = [
+                MODEL_LABELS_CN.get(item, item)
+                for item in juice["session_distinct_high_groups"]
+            ]
+            conflicts = juice.get("session_conflicting_observations", [])
+            if len(labels) >= 2:
+                detail = f"高档同时出现：{'、'.join(labels)}"
+            elif conflicts:
+                detail = "与主要型号冲突：" + "、".join(
+                    f"{EFFORT_LABELS_CN.get(item['effort'], item['effort'])}档={item['normalized_value']}"
+                    for item in conflicts
+                )
+            else:
+                detail = "型号结果互相冲突"
+            print(f"严重警报：{detail}。已直接标记混用。")
+    print(f"线路情况：{network['title_cn']}（{network['detail_cn']}）")
+    print(
+        f"样本：{attempts}/{requested} 轮；"
+        f"可信端自行验证失败 {summary['rejected_trusted_attempts']} 次"
+    )
+    print(f"详细脱敏报告：{report_path.resolve()}")
+    print("=" * 62)
 def run_probe(args: argparse.Namespace) -> dict[str, Any]:
     trusted_key = os.getenv(args.trusted_key_env)
     candidate_key = os.getenv(args.candidate_key_env)
     if not trusted_key:
-        raise SystemExit(f"environment variable {args.trusted_key_env} is required")
+        raise SystemExit(f"缺少可信 API 临时密钥环境变量：{args.trusted_key_env}")
     if not candidate_key:
-        raise SystemExit(f"environment variable {args.candidate_key_env} is required")
+        raise SystemExit(f"缺少待测 API 临时密钥环境变量：{args.candidate_key_env}")
 
     trusted = ResponsesClient(args.trusted_base_url, trusted_key, args.timeout)
     candidate = ResponsesClient(args.candidate_base_url, candidate_key, args.timeout)
@@ -334,8 +489,8 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         input_value = random_ten_digits()
         expected = transform(task, input_value)
         print(
-            f"Attempt {attempt}/{max_attempts}: {task}, "
-            f"valid {len(valid_trials)}/{args.trials}",
+            f"\n正在检测第 {len(valid_trials) + 1}/{args.trials} 轮："
+            f"{TASK_LABELS_CN.get(task, task)}",
             flush=True,
         )
         try:
@@ -351,12 +506,14 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                     "error": redact(str(exc)),
                 }
             )
+            print("本轮舍弃：可信 API 生成状态失败。", flush=True)
             continue
 
         output = seed.get("output")
         visible = output_text(seed)
         if not isinstance(output, list):
             rejected_attempts.append({"attempt": attempt, "reason": "missing_output_array"})
+            print("本轮舍弃：可信 API 返回格式不完整。", flush=True)
             continue
         fingerprints = encrypted_fingerprints(output)
         sanitized_output = json.dumps(redact(output), ensure_ascii=False)
@@ -371,6 +528,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                     "visible_plaintext_leak": visible_leak,
                 }
             )
+            print("本轮舍弃：可信状态不符合 READY、密文或无泄漏要求。", flush=True)
             continue
 
         trusted_self = call_and_score(
@@ -387,6 +545,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                     "trusted_self": trusted_self,
                 }
             )
+            print("本轮舍弃：可信 API 无法自证刚生成的状态。", flush=True)
             continue
 
         conditions = {}
@@ -421,11 +580,17 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "candidate": conditions,
             }
         )
+        print_candidate_attempt_result(valid_trials[-1])
 
     def count_exact(condition: str) -> int:
         return sum(bool(trial["candidate"][condition]["exact"]) for trial in valid_trials)
 
-    valid_count = len(valid_trials)
+    candidate_attempt_count = len(valid_trials)
+    complete_trial_count = sum(
+        all(result.get("status") != "error" for result in trial["candidate"].values())
+        for trial in valid_trials
+    )
+    valid_count = candidate_attempt_count
     full_exact = count_exact("full")
     no_id_exact = count_exact("without_ids")
     message_exact = count_exact("message_only")
@@ -448,37 +613,65 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         any(result.get("transport_attempts", 1) > 1 for result in trial["candidate"].values())
         for trial in valid_trials
     )
+    juice_repeats = getattr(args, "juice_repeats", 3)
+    no_juice = getattr(args, "no_juice", False)
+    juice_observations: list[dict[str, Any]] = []
+    if not no_juice:
+        jobs = [effort for effort in EFFORTS for _ in range(juice_repeats)]
+        for index in range(len(jobs) - 1, 0, -1):
+            other = secrets.randbelow(index + 1)
+            jobs[index], jobs[other] = jobs[other], jobs[index]
+        print("\n" + "=" * 66)
+        print("开始第二层：juice 浅层型号指纹")
+        print("五个推理档位会各测多次；高档互斥结果实行混用零容忍。")
+        print("=" * 66, flush=True)
+        for index, effort in enumerate(jobs, start=1):
+            print(
+                f"浅层指纹 {index}/{len(jobs)}：{EFFORT_LABELS_CN[effort]}档……",
+                flush=True,
+            )
+            observation = run_juice_request(
+                candidate,
+                args.candidate_model,
+                effort,
+                max_transport_attempts=args.candidate_retries + 1,
+            )
+            juice_observations.append(observation)
+            if observation["answer_kind"] == "number":
+                detail = f"数字 {observation['normalized_value']}"
+            elif observation["answer_kind"] == "refusal":
+                detail = "模型拒绝提供（记为无证据）"
+            elif observation["answer_kind"] == "error":
+                detail = "接口错误（记为无证据）"
+            else:
+                detail = "其他非数字回复（记为无证据）"
+            print(f"  结果：{detail}", flush=True)
+            if index < len(jobs):
+                time.sleep(random_float(args.candidate_min_gap, args.candidate_max_gap))
+    juice_summary = summarize_juice(juice_observations, per_effort=juice_repeats)
     required_matches = max(args.min_matches, math.ceil(args.min_match_rate * args.trials))
 
-    if valid_count < args.trials:
-        verdict = "inconclusive"
-        reason = "trusted endpoint did not produce enough self-verifiable challenge states"
-    elif candidate_error_rounds or candidate_retry_rounds:
-        verdict = "inconclusive"
-        reason = "candidate transport was not stable for every challenge in the verdict denominator"
-    elif plaintext_leaks:
-        verdict = "invalid"
-        reason = "one or more candidate requests contained challenge plaintext"
-    elif message_exact or corrupt_exact:
-        verdict = "suspicious"
-        reason = "a negative control unexpectedly matched the hidden challenge"
-    elif full_exact >= required_matches and no_id_exact >= required_matches:
-        verdict = "gpt_5_6_encrypted_state_compatible"
-        reason = (
-            "candidate repeatedly recovered trusted GPT-5.6 hidden values from encrypted state, "
-            "including after response item IDs were removed"
-        )
-    elif full_exact == 0 and no_id_exact == 0:
-        verdict = "not_compatible_in_this_probe"
-        reason = "candidate recovered none of the trusted encrypted challenge states"
-    else:
-        verdict = "inconclusive"
-        reason = "partial replay evidence did not reach the configured threshold"
+    verdict, reason = encrypted_state_verdict(
+        attempts=valid_count,
+        required_attempts=args.trials,
+        full_exact=full_exact,
+        without_ids_exact=no_id_exact,
+        required_matches=required_matches,
+        message_only_exact=message_exact,
+        corrupted_ciphertext_exact=corrupt_exact,
+        plaintext_leaks=plaintext_leaks,
+    )
+    network_summary = connection_quality(candidate_error_rounds, candidate_retry_rounds)
+    combined = combined_summary(
+        verdict, juice_summary, args.candidate_model, network_summary
+    )
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "verdict": verdict,
+        "encrypted_state_verdict": verdict,
+        "combined_verdict": combined["status"],
         "reason": reason,
         "scope": (
             "Encrypted reasoning-state compatibility with the trusted GPT-5.6 source. "
@@ -489,6 +682,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "trusted_model": args.trusted_model,
             "candidate_base_url": args.candidate_base_url,
             "candidate_model": args.candidate_model,
+            "requested_candidate_attempts": args.trials,
             "requested_valid_trials": args.trials,
             "max_attempts": max_attempts,
             "required_matches_per_positive_condition": required_matches,
@@ -497,11 +691,20 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "candidate_transient_retries": args.candidate_retries,
             "candidate_request_gap_seconds": [args.candidate_min_gap, args.candidate_max_gap],
             "candidate_errors_remain_in_verdict_denominator": True,
-            "candidate_retry_round_blocks_passing": True,
+            "candidate_error_round_blocks_passing": False,
+            "candidate_retry_round_blocks_passing": False,
+            "network_quality_reported_separately": True,
+            "juice_probe_enabled": not no_juice,
+            "juice_repeats_per_effort": juice_repeats,
+            "juice_high_mixing_zero_tolerance": True,
+            "juice_known_cross_effort_conflict_zero_tolerance": True,
+            "juice_mixing_flag_scope": "entire_run",
             "keys_persisted": False,
             "raw_ciphertext_persisted": False,
         },
         "summary": {
+            "candidate_attempts": candidate_attempt_count,
+            "complete_trials": complete_trial_count,
             "valid_trials": valid_count,
             "rejected_trusted_attempts": len(rejected_attempts),
             "candidate_full_exact": full_exact,
@@ -515,6 +718,11 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "blind_guess_upper_tail_full": f"{blind_guess_tail_probability(full_exact, valid_count):.3e}",
             "blind_guess_upper_tail_without_ids": f"{blind_guess_tail_probability(no_id_exact, valid_count):.3e}",
         },
+        "network_summary": network_summary,
+        "juice_summary": juice_summary,
+        "combined_summary": combined,
+        "juice_observations": juice_observations,
+        "candidate_attempts": valid_trials,
         "valid_trials": valid_trials,
         "rejected_attempts": rejected_attempts,
         "limitations": [
@@ -522,6 +730,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "A future or different model with backward-compatible reasoning decryption can pass.",
             "The probe establishes capability compatibility, not model weights, ownership, or hosting identity.",
             "Sol, Terra, and Luna share this observable compatibility and cannot be reliably distinguished here.",
+            "Juice is an auxiliary visible-output fingerprint and can be spoofed by a relay.",
         ],
     }
 
@@ -544,7 +753,58 @@ def self_test() -> None:
     corrupted = context_variant(sample, "corrupted_ciphertext")
     assert corrupted[0]["encrypted_content"] != sample[0]["encrypted_content"]
     assert encrypted_fingerprints(sample)[0]["sha256"] == sha256("abcdef")
-    print("self-test: PASS")
+    assert classify_visible_answer("8.855")["normalized_value"] == "8.855"
+    assert classify_visible_answer("I can't provide that.")["kind"] == "refusal"
+    assert matching_models("high", "40855") == ["gpt_5_6_sol"]
+    assert matching_models("high", "32") == ["gpt_5_6_terra"]
+    assert matching_models("high", "48") == ["gpt_5_6_luna"]
+    assert set(matching_models("low", "8")) == {
+        "gpt_5_6_sol", "gpt_5_6_luna", "gpt_5_4_mini"
+    }
+    noisy_verdict, _ = encrypted_state_verdict(
+        attempts=20,
+        required_attempts=20,
+        full_exact=16,
+        without_ids_exact=15,
+        required_matches=15,
+        message_only_exact=0,
+        corrupted_ciphertext_exact=0,
+        plaintext_leaks=0,
+    )
+    assert noisy_verdict == "gpt_5_6_encrypted_state_compatible"
+    assert connection_quality(1, 2)["status"] == "unstable"
+    assert connection_quality(0, 2)["status"] == "intermittent"
+    assert connection_quality(0, 0)["status"] == "smooth"
+
+    def juice_observation(effort: str, value: str) -> dict[str, Any]:
+        return {
+            "effort": effort,
+            "status": "ok",
+            "answer_kind": "number",
+            "normalized_value": value,
+            "matched_models": matching_models(effort, value),
+        }
+
+    sol = [
+        juice_observation("high", "40855"),
+        juice_observation("low", "8"),
+        juice_observation("high", "40850"),
+        juice_observation("medium", "16"),
+        juice_observation("high", "40855"),
+    ]
+    sol_summary = summarize_juice(sol)
+    assert sol_summary["status"] == "classified"
+    assert sol_summary["likely_model"] == "gpt_5_6_sol"
+    assert sol_summary["confidence"] == "high"
+    mixed = sol + [juice_observation("high", "48")] + [
+        juice_observation("high", "40855") for _ in range(5)
+    ]
+    mixed_summary = summarize_juice(mixed)
+    assert mixed_summary["status"] == "mixed_or_inconsistent"
+    assert set(mixed_summary["session_distinct_high_groups"]) == {
+        "gpt_5_6_sol", "gpt_5_6_luna"
+    }
+    print("自检：通过（模型判定与线路分离、juice 指纹、混用零容忍）")
 
 
 def parse_args() -> argparse.Namespace:
@@ -562,6 +822,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-retries", type=int, default=2)
     parser.add_argument("--candidate-min-gap", type=float, default=2.0)
     parser.add_argument("--candidate-max-gap", type=float, default=5.0)
+    parser.add_argument("--juice-repeats", type=int, default=3)
+    parser.add_argument("--no-juice", action="store_true")
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--output", type=Path, default=Path("gpt56_probe_report.json"))
     parser.add_argument("--self-test", action="store_true")
@@ -580,6 +842,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--candidate-retries must be between 0 and 5")
     if args.candidate_min_gap < 0 or args.candidate_max_gap < args.candidate_min_gap:
         parser.error("candidate gaps must satisfy 0 <= min <= max")
+    if not 1 <= args.juice_repeats <= 5:
+        parser.error("juice-repeats must be between 1 and 5")
     return args
 
 
@@ -591,9 +855,10 @@ def main() -> int:
     report = run_probe(args)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"verdict": report["verdict"], "reason": report["reason"], "summary": report["summary"]}, ensure_ascii=False, indent=2))
-    print(f"Sanitized report: {args.output.resolve()}")
-    return 0 if report["verdict"] == "gpt_5_6_encrypted_state_compatible" else 1
+    print_probe_summary(report, args.output)
+    if args.no_juice:
+        return 0 if report["verdict"] == "gpt_5_6_encrypted_state_compatible" else 1
+    return 0 if report["combined_verdict"] == "compatible_and_variant_consistent" else 1
 
 
 if __name__ == "__main__":

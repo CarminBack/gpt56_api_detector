@@ -14,10 +14,20 @@ import secrets
 import time
 from typing import Any
 
+from gpt56_juice_probe import (
+    EFFORT_LABELS_CN,
+    MODEL_LABELS_CN,
+    MONITOR_SCHEDULE,
+    combined_summary,
+    run_juice_request,
+    summarize_juice,
+)
 from gpt56_reasoning_probe import (
     ProbeError,
     ResponsesClient,
+    connection_quality,
     context_variant,
+    encrypted_state_verdict,
     encrypted_fingerprints,
     output_text,
     random_ten_digits,
@@ -268,22 +278,22 @@ def window_summary(
     task_counts = {
         task: sum(item.get("task") == task for item in window) for task in TASK_PROMPTS
     }
-    if attempt_count < window_size:
-        verdict = "warming_up"
-    elif leaks:
-        verdict = "invalid"
-    elif exact["message_only"] or exact["corrupted_ciphertext"]:
-        verdict = "suspicious"
-    elif error_rounds or retry_rounds:
-        verdict = "inconclusive_candidate_unstable"
-    elif exact["full"] >= required and exact["without_ids"] >= required:
-        verdict = "gpt_5_6_encrypted_state_compatible"
-    elif exact["full"] == 0 and exact["without_ids"] == 0:
-        verdict = "not_compatible_in_this_window"
-    else:
-        verdict = "inconclusive"
+    verdict, _ = encrypted_state_verdict(
+        attempts=attempt_count,
+        required_attempts=window_size,
+        full_exact=exact["full"],
+        without_ids_exact=exact["without_ids"],
+        required_matches=required,
+        message_only_exact=exact["message_only"],
+        corrupted_ciphertext_exact=exact["corrupted_ciphertext"],
+        plaintext_leaks=leaks,
+        warming_verdict="warming_up",
+        incompatible_verdict="not_compatible_in_this_window",
+    )
+    network = connection_quality(error_rounds, retry_rounds)
     return {
         "verdict": verdict,
+        "network_summary": network,
         "candidate_attempts_in_window": attempt_count,
         "complete_trials_in_window": complete_count,
         "valid_trials_in_window": complete_count,
@@ -345,25 +355,139 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+TASK_LABELS = {
+    "reverse": "十位数字倒序",
+    "rotate_left_3": "前三位移到末尾",
+    "complement_9": "逐位计算九补数",
+}
+
+FAILURE_LABELS = {
+    "trusted_seed_error": "可信 API 生成状态失败",
+    "missing_output_array": "可信 API 返回格式不完整",
+    "invalid_trusted_seed": "可信状态不符合 READY/密文/无泄漏要求",
+    "trusted_state_not_self_verifiable": "可信 API 无法自证刚生成的状态",
+    "candidate_request_error": "待测 API 请求在重试后仍失败",
+}
+
+VERDICT_LABELS = {
+    "warming_up": ("还在检测", "尚未判定", "还没有收集满 20 次。"),
+    "gpt_5_6_encrypted_state_compatible": (
+        "强检测通过",
+        "是",
+        "极高置信度具备 GPT-5.6 加密状态处理能力。",
+    ),
+    "inconclusive_candidate_unstable": (
+        "旧版线路判定",
+        "尚未判定",
+        "这是旧版报告状态；新版已把模型真假和线路质量分开。",
+    ),
+    "inconclusive": ("证据不够", "尚不能确认", "答对次数没有达到门槛。"),
+    "not_compatible_in_this_window": ("没有测到 GPT-5.6 能力", "否", "两种有效测试都没有答对。"),
+    "suspicious": ("检测异常", "否", "本来不该答对的测试出现命中。"),
+    "invalid": ("检测无效", "否", "请求中泄漏了正确答案。"),
+}
+
+
+def transport_event_count(attempt: dict[str, Any] | None) -> int:
+    if not attempt:
+        return 0
+    return sum(
+        len(result.get("transport_errors", []))
+        for result in attempt["candidate"].values()
+    )
+
+
+def print_monitor_status(
+    report: dict[str, Any],
+    trial: dict[str, Any] | None,
+    failure: dict[str, Any] | None,
+    candidate_attempt: dict[str, Any] | None,
+    juice_observation: dict[str, Any] | None,
+) -> None:
+    summary = report["rolling_summary"]
+    combined = report["combined_summary"]
+    juice = report["juice_summary"]
+    network = report["network_summary"]
+    attempts = summary["candidate_attempts_in_window"]
+    remaining = max(summary["window_size"] - attempts, 0)
+    required = summary["required_positive_matches"]
+    abnormal = summary["message_only_exact"] + summary["corrupted_ciphertext_exact"]
+    confidence_cn = {
+        "high": "高", "medium": "中", "preliminary": "初步", "insufficient": "不足"
+    }.get(juice["confidence"], juice["confidence"])
+
+    print("\n" + "=" * 62)
+    print(f"[第 {report['cycles']} 轮] {datetime.now().astimezone():%Y-%m-%d %H:%M:%S}")
+    print(f"当前结论：{combined['title_cn']}")
+    if summary["verdict"] == "warming_up":
+        print(f"进度：{attempts}/{summary['window_size']}，还差 {remaining} 轮")
+    elif summary["verdict"] == "gpt_5_6_encrypted_state_compatible":
+        print("模型能力：强检测通过，极高置信度具备 GPT-5.6 能力")
+    else:
+        print(f"模型能力：{VERDICT_LABELS.get(summary['verdict'], (summary['verdict'],))[0]}")
+
+    print(
+        f"答对情况：完整状态 {summary['full_exact']}/{required}，"
+        f"去掉编号 {summary['without_ids_exact']}/{required}；"
+        f"异常 {abnormal}，泄漏 {summary['plaintext_leaks']}"
+    )
+    mixed = juice["status"] == "mixed_or_inconsistent"
+    print(
+        f"具体型号：{juice['likely_model_cn']}（置信度{confidence_cn}，"
+        f"高档 {juice['high_numeric_samples']}/{juice['required_high_samples']}）；"
+        f"混用：{'已发现' if mixed else '未发现'}"
+    )
+    print(f"线路情况：{network['title_cn']}（{network['detail_cn']}）")
+
+    current = trial or candidate_attempt
+    if current is not None:
+        candidate = current["candidate"]
+        abnormal_now = int(bool(candidate["message_only"].get("exact"))) + int(
+            bool(candidate["corrupted_ciphertext"].get("exact"))
+        )
+        retry_events = transport_event_count(current)
+        failed = sum(item.get("status") == "error" for item in candidate.values())
+        print(
+            f"本轮：{TASK_LABELS.get(current['task'], current['task'])}；"
+            f"完整状态{'答对' if candidate['full'].get('exact') else '未答对'}，"
+            f"去掉编号{'答对' if candidate['without_ids'].get('exact') else '未答对'}，"
+            f"异常 {abnormal_now}，失败 {failed}，重试 {retry_events}"
+        )
+    elif failure is not None:
+        reason = failure.get("reason", "unknown")
+        print(f"本轮未测试待测端：{FAILURE_LABELS.get(reason, reason)}")
+
+    if mixed:
+        print("严重警报：已经发现互相冲突的型号结果，本会话会一直保留这个标记。")
+    print(f"详细报告：{report['configuration']['report_path']}")
+    print("=" * 62, flush=True)
+
 def main() -> int:
     args = parse_args()
     trusted_key = os.getenv(args.trusted_key_env)
     candidate_key = os.getenv(args.candidate_key_env)
     if not trusted_key or not candidate_key:
-        raise SystemExit("trusted and candidate key environment variables are required")
+        raise SystemExit("缺少可信 API 或待测 API 的临时密钥环境变量")
     trusted = ResponsesClient(args.trusted_base_url, trusted_key, args.timeout)
     candidate = ResponsesClient(args.candidate_base_url, candidate_key, args.timeout)
     trials: list[dict[str, Any]] = []
     candidate_attempts: list[dict[str, Any]] = []
+    juice_observations: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     started = datetime.now(timezone.utc).isoformat()
     cycle = 0
     tasks = tuple(TASK_PROMPTS)
-    print("Continuous monitor v2 started. Press Ctrl+C to stop.", flush=True)
+    print("=" * 66)
+    print("GPT-5.6 API 综合检测 v3.1 已启动")
+    print("第一层检查加密状态能力，第二层用 juice 指纹区分具体型号和发现混用。")
+    print("按 Ctrl+C 可以随时停止，最新报告会自动保存。")
+    print("模型真假和线路质量分开判断；网络重试不会把真模型直接判成假。")
+    print("=" * 66, flush=True)
     try:
         while not args.max_valid_trials or len(trials) < args.max_valid_trials:
             cycle += 1
             task = tasks[len(candidate_attempts) % len(tasks)]
+            print(f"\n正在执行第 {cycle} 轮：{TASK_LABELS.get(task, task)}……", flush=True)
             trial, failure = run_one_challenge(
                 trusted,
                 candidate,
@@ -374,6 +498,7 @@ def main() -> int:
                 args.candidate_min_gap,
                 args.candidate_max_gap,
             )
+            candidate_attempt = None
             if trial is not None:
                 trials.append(trial)
                 candidate_attempts.append(trial)
@@ -382,12 +507,37 @@ def main() -> int:
                 if candidate_attempt is not None:
                     candidate_attempts.append(candidate_attempt)
                 rejected.append(failure)
+            current_attempt = trial or candidate_attempt
+            juice_observation = None
+            if current_attempt is not None:
+                juice_effort = MONITOR_SCHEDULE[
+                    (len(candidate_attempts) - 1) % len(MONITOR_SCHEDULE)
+                ]
+                print(
+                    f"正在进行浅层型号指纹：{EFFORT_LABELS_CN[juice_effort]}档……",
+                    flush=True,
+                )
+                time.sleep(random_float(args.candidate_min_gap, args.candidate_max_gap))
+                juice_observation = run_juice_request(
+                    candidate,
+                    args.candidate_model,
+                    juice_effort,
+                    max_transport_attempts=args.candidate_retries + 1,
+                )
+                juice_observations.append(juice_observation)
             summary = window_summary(
                 candidate_attempts, args.window, args.required_matches
             )
+            juice_summary = summarize_juice(juice_observations)
+            combined = combined_summary(
+                summary["verdict"],
+                juice_summary,
+                args.candidate_model,
+                summary["network_summary"],
+            )
             report = {
-                "schema_version": 2,
-                "mode": "continuous_balanced_monitor",
+                "schema_version": 3,
+                "mode": "continuous_combined_v3_monitor",
                 "started_at": started,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "configuration": {
@@ -404,20 +554,26 @@ def main() -> int:
                     "rolling_window": args.window,
                     "required_positive_matches": args.required_matches,
                     "candidate_errors_remain_in_window_denominator": True,
-                    "candidate_retry_round_blocks_passing": True,
+                    "candidate_error_round_blocks_passing": False,
+                    "candidate_retry_round_blocks_passing": False,
+                    "network_quality_reported_separately": True,
+                    "juice_probe_enabled": True,
+                    "juice_high_mixing_zero_tolerance": True,
+                    "juice_known_cross_effort_conflict_zero_tolerance": True,
+                    "juice_mixing_flag_scope": "entire_session",
+                    "report_path": str(args.output.resolve()),
                     "keys_persisted": False,
                     "raw_ciphertext_persisted": False,
                 },
                 "experiment_controls": [
-                    "canonical recall prompt selected from empirical trusted-endpoint stability data",
+                    "canonical prompts selected for trusted-state stability",
                     "same canonical recall prompt for every condition",
                     "balanced task rotation across candidate attempts",
                     "fresh random challenge on every cycle",
-                    "canonical seed and recall prompts selected for trusted-state stability",
                     "randomized candidate condition order",
                     "random gap between candidate condition requests",
                     "bounded randomized backoff for transient candidate transport errors",
-                    "candidate error and retry rounds remain in the verdict window",
+                    "candidate error and retry rounds stay in the denominator but only affect network quality",
                 ],
                 "warning": (
                     "Randomization reduces simple fixed-pattern detection only. A relay can still recognize "
@@ -425,44 +581,30 @@ def main() -> int:
                 ),
                 "cycles": cycle,
                 "total_candidate_attempts": len(candidate_attempts),
+                "total_juice_probes": len(juice_observations),
                 "total_valid_trials": len(trials),
                 "total_rejected_attempts": len(rejected),
                 "rolling_summary": summary,
+                "network_summary": summary["network_summary"],
+                "juice_summary": juice_summary,
+                "combined_summary": combined,
+                "juice_observations": juice_observations,
                 "candidate_attempts": candidate_attempts,
                 "valid_trials": trials,
                 "rejected_attempts": rejected,
             }
             atomic_write(args.output, report)
-            print(
-                f"[{report['updated_at']}] attempts={len(candidate_attempts)} "
-                f"complete={len(trials)} rejected={len(rejected)} "
-                f"window={summary['candidate_attempts_in_window']}/{args.window} "
-                f"full={summary['full_exact']} no-id={summary['without_ids_exact']} "
-                f"errors={summary['candidate_error_rounds']} "
-                f"retries={summary['candidate_retry_rounds']} "
-                f"negative={summary['message_only_exact'] + summary['corrupted_ciphertext_exact']} "
-                f"verdict={summary['verdict']}",
-                flush=True,
+            print_monitor_status(
+                report, trial, failure, candidate_attempt, juice_observation
             )
-            if failure is not None:
-                statuses = sorted(
-                    {
-                        result.get("http_status")
-                        for result in failure.get("conditions", {}).values()
-                        if result.get("http_status") is not None
-                    }
-                )
-                detail = f" HTTP={statuses}" if statuses else ""
-                print(f"Last attempt rejected: {failure['reason']}.{detail}", flush=True)
             if args.max_valid_trials and len(trials) >= args.max_valid_trials:
                 break
             delay = random_interval(args.min_interval, args.max_interval)
-            print(f"Next challenge in {delay} seconds.", flush=True)
+            print(f"下一轮将在 {delay} 秒后开始。", flush=True)
             time.sleep(delay)
     except KeyboardInterrupt:
-        print("\nMonitor stopped by user. The latest report has been saved.", flush=True)
+        print("\n监控已由用户停止，最新脱敏报告已经保存。", flush=True)
     return 0
-
 if __name__ == "__main__":
     raise SystemExit(main())
 
