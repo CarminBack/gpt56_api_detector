@@ -309,6 +309,102 @@ def window_summary(
         "task_counts": task_counts,
     }
 
+def monitor_health_summary(
+    attempts: list[dict[str, Any]],
+    consecutive_trusted_failures: int,
+    now: datetime,
+    stale_after_seconds: int,
+) -> dict[str, Any]:
+    last_candidate_at = attempts[-1]["time"] if attempts else None
+    evidence_age_seconds: int | None = None
+    if last_candidate_at:
+        evidence_age_seconds = max(
+            0,
+            int((now - datetime.fromisoformat(last_candidate_at)).total_seconds()),
+        )
+
+    unavailable = consecutive_trusted_failures >= 3 or (
+        evidence_age_seconds is not None
+        and evidence_age_seconds > stale_after_seconds
+    )
+    if unavailable:
+        status = "trusted_source_unavailable"
+        title = "可信端不可用，监控未刷新"
+        detail = (
+            f"可信端已连续失败 {consecutive_trusted_failures} 轮；"
+            + (
+                f"距上次待测挑战 {evidence_age_seconds} 秒"
+                if evidence_age_seconds is not None
+                else "尚未产生待测挑战"
+            )
+        )
+    elif consecutive_trusted_failures:
+        status = "trusted_source_degraded"
+        title = "可信端有波动"
+        detail = f"可信端连续失败 {consecutive_trusted_failures} 轮，等待自动恢复"
+    elif not attempts:
+        status = "collecting"
+        title = "正在等待首个有效挑战"
+        detail = "监控刚启动，尚未形成待测端样本"
+    else:
+        status = "healthy"
+        title = "监控正常"
+        detail = "可信端能够生成挑战，待测端证据正在刷新"
+
+    backoff_seconds = 0
+    if status == "trusted_source_unavailable":
+        failure_step = max(0, consecutive_trusted_failures - 3)
+        backoff_seconds = min(
+            240, 60 * (2 ** min(failure_step, 2))
+        )
+
+    return {
+        "status": status,
+        "title_cn": title,
+        "detail_cn": detail,
+        "current_monitoring_effective": status in {
+            "healthy", "trusted_source_degraded"
+        },
+        "consecutive_trusted_failures": consecutive_trusted_failures,
+        "last_candidate_at": last_candidate_at,
+        "candidate_evidence_age_seconds": evidence_age_seconds,
+        "stale_after_seconds": stale_after_seconds,
+        "next_retry_backoff_seconds": backoff_seconds,
+    }
+
+
+def apply_monitor_health(
+    combined: dict[str, Any], health: dict[str, Any]
+) -> dict[str, Any]:
+    result = copy.deepcopy(combined)
+    result["historical_result"] = {
+        "status": combined["status"],
+        "title_cn": combined["title_cn"],
+        "passed_cn": combined["passed_cn"],
+        "explanation_cn": combined["explanation_cn"],
+    }
+    result["monitor_health_status"] = health["status"]
+    if health["status"] == "trusted_source_unavailable":
+        if combined["status"] == "compatible_and_variant_consistent":
+            result["status"] = "historical_pass_trusted_source_unavailable"
+            result["title_cn"] = "历史检测通过，但当前监控未刷新"
+            result["passed_cn"] = "历史通过，当前未确认"
+        else:
+            result["status"] = "historical_result_trusted_source_unavailable"
+            result["title_cn"] = (
+                f"当前监控未刷新；历史结论：{combined['title_cn']}"
+            )
+            result["passed_cn"] = "历史结果，当前未确认"
+        result["explanation_cn"] = (
+            f"{combined['explanation_cn']} 当前可信端不可用，"
+            "没有新挑战到达待测端，因此这只是历史窗口结论。"
+        )
+    elif health["status"] == "trusted_source_degraded":
+        result["explanation_cn"] = (
+            f"{combined['explanation_cn']} 可信端暂有波动，程序正在自动重试。"
+        )
+    return result
+
 def atomic_write(path: Path, report: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -408,6 +504,7 @@ def print_monitor_status(
     combined = report["combined_summary"]
     juice = report["juice_summary"]
     network = report["network_summary"]
+    health = report["monitor_health_summary"]
     attempts = summary["candidate_attempts_in_window"]
     remaining = max(summary["window_size"] - attempts, 0)
     required = summary["required_positive_matches"]
@@ -419,10 +516,16 @@ def print_monitor_status(
     print("\n" + "=" * 62)
     print(f"[第 {report['cycles']} 轮] {datetime.now().astimezone():%Y-%m-%d %H:%M:%S}")
     print(f"当前结论：{combined['title_cn']}")
+    print(f"监控状态：{health['title_cn']}（{health['detail_cn']}）")
     if summary["verdict"] == "warming_up":
         print(f"进度：{attempts}/{summary['window_size']}，还差 {remaining} 轮")
     elif summary["verdict"] == "gpt_5_6_encrypted_state_compatible":
-        print("模型能力：强检测通过，极高置信度具备 GPT-5.6 能力")
+        label = (
+            "历史模型能力"
+            if health["status"] == "trusted_source_unavailable"
+            else "模型能力"
+        )
+        print(f"{label}：强检测通过，极高置信度具备 GPT-5.6 能力")
     else:
         print(f"模型能力：{VERDICT_LABELS.get(summary['verdict'], (summary['verdict'],))[0]}")
 
@@ -476,9 +579,13 @@ def main() -> int:
     rejected: list[dict[str, Any]] = []
     started = datetime.now(timezone.utc).isoformat()
     cycle = 0
+    consecutive_trusted_failures = 0
+    stale_after_seconds = max(
+        300, int(args.max_interval * 2 + args.timeout)
+    )
     tasks = tuple(TASK_PROMPTS)
     print("=" * 66)
-    print("GPT-5.6 API 综合检测 v3.1 已启动")
+    print("GPT-5.6 API 综合检测 v3.1.1 已启动")
     print("第一层检查加密状态能力，第二层用 juice 指纹区分具体型号和发现混用。")
     print("按 Ctrl+C 可以随时停止，最新报告会自动保存。")
     print("模型真假和线路质量分开判断；网络重试不会把真模型直接判成假。")
@@ -508,6 +615,10 @@ def main() -> int:
                     candidate_attempts.append(candidate_attempt)
                 rejected.append(failure)
             current_attempt = trial or candidate_attempt
+            if current_attempt is None:
+                consecutive_trusted_failures += 1
+            else:
+                consecutive_trusted_failures = 0
             juice_observation = None
             if current_attempt is not None:
                 juice_effort = MONITOR_SCHEDULE[
@@ -529,17 +640,25 @@ def main() -> int:
                 candidate_attempts, args.window, args.required_matches
             )
             juice_summary = summarize_juice(juice_observations)
-            combined = combined_summary(
+            report_time = datetime.now(timezone.utc)
+            monitor_health = monitor_health_summary(
+                candidate_attempts,
+                consecutive_trusted_failures,
+                report_time,
+                stale_after_seconds,
+            )
+            base_combined = combined_summary(
                 summary["verdict"],
                 juice_summary,
                 args.candidate_model,
                 summary["network_summary"],
             )
+            combined = apply_monitor_health(base_combined, monitor_health)
             report = {
                 "schema_version": 3,
-                "mode": "continuous_combined_v3_monitor",
+                "mode": "continuous_combined_v3_1_1_monitor",
                 "started_at": started,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": report_time.isoformat(),
                 "configuration": {
                     "trusted_base_url": args.trusted_base_url,
                     "trusted_model": args.trusted_model,
@@ -557,6 +676,9 @@ def main() -> int:
                     "candidate_error_round_blocks_passing": False,
                     "candidate_retry_round_blocks_passing": False,
                     "network_quality_reported_separately": True,
+                    "trusted_source_health_reported_separately": True,
+                    "candidate_evidence_stale_after_seconds": stale_after_seconds,
+                    "trusted_failure_backoff_max_seconds": 240,
                     "juice_probe_enabled": True,
                     "juice_high_mixing_zero_tolerance": True,
                     "juice_known_cross_effort_conflict_zero_tolerance": True,
@@ -586,6 +708,7 @@ def main() -> int:
                 "total_rejected_attempts": len(rejected),
                 "rolling_summary": summary,
                 "network_summary": summary["network_summary"],
+                "monitor_health_summary": monitor_health,
                 "juice_summary": juice_summary,
                 "combined_summary": combined,
                 "juice_observations": juice_observations,
@@ -600,7 +723,13 @@ def main() -> int:
             if args.max_valid_trials and len(trials) >= args.max_valid_trials:
                 break
             delay = random_interval(args.min_interval, args.max_interval)
-            print(f"下一轮将在 {delay} 秒后开始。", flush=True)
+            delay = max(
+                delay, monitor_health["next_retry_backoff_seconds"]
+            )
+            if monitor_health["status"] == "trusted_source_unavailable":
+                print(f"可信端异常，{delay} 秒后再试。", flush=True)
+            else:
+                print(f"下一轮将在 {delay} 秒后开始。", flush=True)
             time.sleep(delay)
     except KeyboardInterrupt:
         print("\n监控已由用户停止，最新脱敏报告已经保存。", flush=True)
