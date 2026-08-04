@@ -47,25 +47,34 @@ def ask_secret(prompt: str) -> str:
 def main() -> int:
     print("=" * 66)
     print("GPT-5.6 综合持续监控 v3.1.1")
-    print("程序会同时监控加密状态能力、具体型号指纹和混用情况，按 Ctrl+C 停止。")
+    print("可选择综合监控，或只持续监控 Juice 型号指纹。")
     print("高档 juice 一旦出现互斥型号值，会立即并持续标记混用。")
     print("=" * 66)
 
-    print("\n[1/3] 可信 GPT-5.6 API")
-    trusted_url = ask("API 地址，例如 https://host/v1").rstrip("/")
-    trusted_model = ask("模型名", "gpt-5.6-sol")
-    trusted_key = ask_secret("API key")
+    mode = input("\n监控模式：[1] 综合监控  [2] 仅 Juice [1]: ").strip()
+    juice_only = mode == "2"
+    trusted_url = None
+    trusted_model = "gpt-5.6-sol"
+    trusted_key = None
+    if not juice_only:
+        print("\n[1/3] 可信 GPT-5.6 API")
+        trusted_url = ask("API 地址，例如 https://host/v1").rstrip("/")
+        trusted_model = ask("模型名", "gpt-5.6-sol")
+        trusted_key = ask_secret("API key")
 
     print("\n[2/3] 待测 API")
     candidate_url = ask("API 地址").rstrip("/")
     candidate_model = ask("模型名", "gpt-5.6-sol")
-    same_key = input("是否与可信 API 使用相同 key？[y/N]: ").strip().lower()
-    candidate_key = trusted_key if same_key in {"y", "yes"} else ask_secret("API key")
+    if juice_only:
+        candidate_key = ask_secret("API key")
+    else:
+        same_key = input("是否与可信 API 使用相同 key？[y/N]: ").strip().lower()
+        candidate_key = trusted_key if same_key in {"y", "yes"} else ask_secret("API key")
 
     print("\n[3/3] 监控频率")
-    print("直接按回车会在每轮结束后随机等待 20 到 40 秒。")
-    minimum = ask_int("最短间隔（秒）", 20, 1)
-    maximum = ask_int("最长间隔（秒）", 40, minimum)
+    print("直接按回车会在每轮结束后随机等待 150 到 210 秒。")
+    minimum = ask_int("最短间隔（秒）", 150, 1)
+    maximum = ask_int("最长间隔（秒）", 210, minimum)
     default_report = f"monitor-report-{datetime.now():%Y%m%d-%H%M%S}.json"
     report = Path(ask("报告文件名", default_report)).expanduser().resolve()
 
@@ -75,8 +84,6 @@ def main() -> int:
         return 2
     command = [
         sys.executable, str(monitor),
-        "--trusted-base-url", trusted_url,
-        "--trusted-model", trusted_model,
         "--candidate-base-url", candidate_url,
         "--candidate-model", candidate_model,
         "--min-interval", str(minimum),
@@ -88,8 +95,16 @@ def main() -> int:
         "--candidate-max-gap", "5",
         "--output", str(report),
     ]
+    if juice_only:
+        command.append("--juice-only")
+    else:
+        command.extend([
+            "--trusted-base-url", trusted_url,
+            "--trusted-model", trusted_model,
+        ])
     child_env = os.environ.copy()
-    child_env["TRUSTED_API_KEY"] = trusted_key
+    if trusted_key is not None:
+        child_env["TRUSTED_API_KEY"] = trusted_key
     child_env["CANDIDATE_API_KEY"] = candidate_key
 
     print(f"\n监控已启动，报告会持续更新到：{report}")
@@ -103,7 +118,7 @@ def main() -> int:
     finally:
         child_env.pop("TRUSTED_API_KEY", None)
         child_env.pop("CANDIDATE_API_KEY", None)
-        trusted_key = ""
+        trusted_key = None
         candidate_key = ""
 
 
