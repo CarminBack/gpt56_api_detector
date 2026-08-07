@@ -4,6 +4,7 @@ services:
     container_name: gpt56-api-detector
     restart: unless-stopped
     environment:
+      APP_BROWSER_SECRET: ${APP_BROWSER_SECRET:?APP_BROWSER_SECRET is required}
       REPORT_DIR: /data/reports
     ports:
       - "127.0.0.1:${DETECTOR_PORT:-3056}:8000"

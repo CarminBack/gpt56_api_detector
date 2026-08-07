@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -13,9 +15,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib import error, parse, request
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, SecretStr, model_validator
 
@@ -25,8 +27,56 @@ PROJECT_DIR = APP_DIR.parent
 STATIC_DIR = APP_DIR / "static"
 REPORT_DIR = Path(os.getenv("REPORT_DIR", PROJECT_DIR / "reports")).resolve()
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
+BROWSER_SECRET = os.getenv("APP_BROWSER_SECRET", "")
+if len(BROWSER_SECRET) < 32:
+    raise RuntimeError("APP_BROWSER_SECRET must contain at least 32 characters")
 
+BROWSER_COOKIE = "gpt56_browser"
+BROWSER_COOKIE_MAX_AGE = 365 * 24 * 60 * 60
 app = FastAPI(title="GPT-5.6 Detector", docs_url=None, redoc_url=None)
+
+
+def sign_browser_id(browser_id: str) -> str:
+    signature = hmac.new(
+        BROWSER_SECRET.encode(), browser_id.encode(), hashlib.sha256
+    ).hexdigest()
+    return f"{browser_id}.{signature}"
+
+
+def browser_id_from_token(token: str | None) -> str | None:
+    if not token:
+        return None
+    try:
+        browser_id, signature = token.rsplit(".", 1)
+        if UUID(browser_id).hex != browser_id:
+            return None
+    except (ValueError, AttributeError):
+        return None
+    expected = hmac.new(
+        BROWSER_SECRET.encode(), browser_id.encode(), hashlib.sha256
+    ).hexdigest()
+    return browser_id if hmac.compare_digest(signature, expected) else None
+
+
+@app.middleware("http")
+async def ensure_browser_identity(request: Request, call_next: Any) -> Any:
+    browser_id = browser_id_from_token(request.cookies.get(BROWSER_COOKIE))
+    is_new = browser_id is None
+    if browser_id is None:
+        browser_id = uuid4().hex
+    request.state.browser_id = browser_id
+    response = await call_next(request)
+    if is_new and request.url.path != "/healthz":
+        response.set_cookie(
+            BROWSER_COOKIE,
+            sign_browser_id(browser_id),
+            max_age=BROWSER_COOKIE_MAX_AGE,
+            httponly=True,
+            secure=True,
+            samesite="strict",
+            path="/",
+        )
+    return response
 
 
 def utc_now() -> str:
@@ -88,6 +138,7 @@ class ModelsInput(BaseModel):
 @dataclass
 class Job:
     id: str
+    owner_id: str
     status: str
     created_at: str
     config: dict[str, Any]
@@ -138,16 +189,23 @@ class Job:
 class JobManager:
     def __init__(self) -> None:
         self.jobs: dict[str, Job] = {}
-        self.active_id: str | None = None
+        self.active_ids: dict[str, str] = {}
         self.lock = asyncio.Lock()
         self.tasks: set[asyncio.Task[None]] = set()
         self._load_reports()
 
     def _load_reports(self) -> None:
-        for report_path in sorted(REPORT_DIR.glob("*.json"), reverse=True)[:100]:
+        loaded_per_owner: dict[str, int] = {}
+        for report_path in sorted(REPORT_DIR.glob("*.json"), reverse=True):
+            owner_path = report_path.with_suffix(".owner")
             try:
+                owner_id = owner_path.read_text(encoding="utf-8").strip()
+                if UUID(owner_id).hex != owner_id:
+                    continue
+                if loaded_per_owner.get(owner_id, 0) >= 100:
+                    continue
                 report = json.loads(report_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            except (OSError, ValueError, json.JSONDecodeError):
                 continue
             config = report.get("configuration", {})
             job_id = report_path.stem
@@ -156,6 +214,7 @@ class JobManager:
             ).isoformat()
             self.jobs[job_id] = Job(
                 id=job_id,
+                owner_id=owner_id,
                 status="completed",
                 created_at=created_at,
                 started_at=created_at,
@@ -172,11 +231,19 @@ class JobManager:
                 report_json=report_path,
                 report_html=report_path.with_suffix(".html"),
             )
+            loaded_per_owner[owner_id] = loaded_per_owner.get(owner_id, 0) + 1
 
-    async def start(self, payload: JobInput) -> Job:
+    def owned_job(self, job_id: str, owner_id: str) -> Job:
+        job = self.jobs.get(job_id)
+        if not job or not hmac.compare_digest(job.owner_id, owner_id):
+            raise HTTPException(404, "任务不存在")
+        return job
+
+    async def start(self, payload: JobInput, owner_id: str) -> Job:
         async with self.lock:
-            if self.active_id:
-                active = self.jobs.get(self.active_id)
+            active_id = self.active_ids.get(owner_id)
+            if active_id:
+                active = self.jobs.get(active_id)
                 if active and active.status in {"queued", "running", "stopping"}:
                     raise HTTPException(409, "已有检测任务正在运行")
 
@@ -206,9 +273,15 @@ class JobManager:
                     payload.trusted.api_key.get_secret_value() if payload.trusted else ""
                 ),
             }
-            job = Job(id=job_id, status="queued", created_at=utc_now(), config=config)
+            job = Job(
+                id=job_id,
+                owner_id=owner_id,
+                status="queued",
+                created_at=utc_now(),
+                config=config,
+            )
             self.jobs[job_id] = job
-            self.active_id = job_id
+            self.active_ids[owner_id] = job_id
             task = asyncio.create_task(self._run(job, secrets))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
@@ -247,12 +320,15 @@ class JobManager:
 
     async def _run(self, job: Job, secrets: dict[str, str]) -> None:
         output_path = REPORT_DIR / f"{job.id}.json"
+        owner_path = output_path.with_suffix(".owner")
         env = os.environ.copy()
         env["CANDIDATE_API_KEY"] = secrets["candidate"]
         if secrets["trusted"]:
             env["TRUSTED_API_KEY"] = secrets["trusted"]
         command = self._command(job, output_path)
         try:
+            owner_path.write_text(job.owner_id, encoding="utf-8")
+            owner_path.chmod(0o600)
             job.status = "running"
             job.started_at = utc_now()
             process = subprocess.Popen(
@@ -302,14 +378,17 @@ class JobManager:
             env.pop("TRUSTED_API_KEY", None)
             job.process = None
             job.finished_at = utc_now()
+            if not job.report_json:
+                try:
+                    owner_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             async with self.lock:
-                if self.active_id == job.id:
-                    self.active_id = None
+                if self.active_ids.get(job.owner_id) == job.id:
+                    self.active_ids.pop(job.owner_id, None)
 
-    async def stop(self, job_id: str) -> Job:
-        job = self.jobs.get(job_id)
-        if not job:
-            raise HTTPException(404, "任务不存在")
+    async def stop(self, job_id: str, owner_id: str) -> Job:
+        job = self.owned_job(job_id, owner_id)
         if job.status not in {"queued", "running"} or not job.process:
             raise HTTPException(409, "任务当前不能停止")
         job.status = "stopping"
@@ -390,55 +469,59 @@ async def list_models(payload: ModelsInput) -> dict[str, Any]:
 
 
 @app.get("/api/jobs")
-async def list_jobs() -> dict[str, Any]:
-    jobs = sorted(manager.jobs.values(), key=lambda item: item.created_at, reverse=True)
-    return {"jobs": [job.public() for job in jobs[:100]], "active_id": manager.active_id}
+async def list_jobs(request: Request) -> dict[str, Any]:
+    owner_id = request.state.browser_id
+    jobs = sorted(
+        (job for job in manager.jobs.values() if job.owner_id == owner_id),
+        key=lambda item: item.created_at,
+        reverse=True,
+    )
+    return {
+        "jobs": [job.public() for job in jobs[:100]],
+        "active_id": manager.active_ids.get(owner_id),
+    }
 
 
 @app.post("/api/jobs", status_code=202)
-async def create_job(payload: JobInput) -> dict[str, Any]:
+async def create_job(payload: JobInput, request: Request) -> dict[str, Any]:
     try:
-        job = await manager.start(payload)
+        job = await manager.start(payload, request.state.browser_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return job.public()
 
 
 @app.get("/api/jobs/{job_id}")
-async def get_job(job_id: str) -> dict[str, Any]:
-    job = manager.jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "任务不存在")
+async def get_job(job_id: str, request: Request) -> dict[str, Any]:
+    job = manager.owned_job(job_id, request.state.browser_id)
     return job.public()
 
 
 @app.get("/api/jobs/{job_id}/logs")
-async def get_logs(job_id: str, offset: int = 0) -> dict[str, Any]:
-    job = manager.jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "任务不存在")
+async def get_logs(job_id: str, request: Request, offset: int = 0) -> dict[str, Any]:
+    job = manager.owned_job(job_id, request.state.browser_id)
     safe_offset = max(0, min(offset, len(job.logs)))
     return {"lines": job.logs[safe_offset:], "next_offset": len(job.logs)}
 
 
 @app.post("/api/jobs/{job_id}/stop", status_code=202)
-async def stop_job(job_id: str) -> dict[str, Any]:
-    job = await manager.stop(job_id)
+async def stop_job(job_id: str, request: Request) -> dict[str, Any]:
+    job = await manager.stop(job_id, request.state.browser_id)
     return job.public()
 
 
 @app.get("/api/jobs/{job_id}/report.html")
-async def report_html(job_id: str) -> FileResponse:
-    job = manager.jobs.get(job_id)
-    if not job or not job.report_html or not job.report_html.exists():
+async def report_html(job_id: str, request: Request) -> FileResponse:
+    job = manager.owned_job(job_id, request.state.browser_id)
+    if not job.report_html or not job.report_html.exists():
         raise HTTPException(404, "HTML 报告不存在")
     return FileResponse(job.report_html, media_type="text/html")
 
 
 @app.get("/api/jobs/{job_id}/report.json")
-async def report_json(job_id: str) -> FileResponse:
-    job = manager.jobs.get(job_id)
-    if not job or not job.report_json or not job.report_json.exists():
+async def report_json(job_id: str, request: Request) -> FileResponse:
+    job = manager.owned_job(job_id, request.state.browser_id)
+    if not job.report_json or not job.report_json.exists():
         raise HTTPException(404, "JSON 报告不存在")
     return FileResponse(
         job.report_json,

@@ -379,7 +379,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-默认仅监听 `127.0.0.1:3056`，应通过带 HTTPS 的反向代理访问。Web 服务不要求登录；API Key 只进入当前检测子进程环境，不写入报告、任务历史或浏览器本地存储。目标 API 仅允许公网 HTTPS 地址。
+默认仅监听 `127.0.0.1:3056`，应通过带 HTTPS 的反向代理访问。Web 服务不要求登录，通过签名的匿名浏览器 Cookie 隔离任务、实时日志和历史报告；同一浏览器一次运行一个任务，不同浏览器可以并发运行。清除 Cookie 后会被视为新浏览器，无法再看到原浏览器的历史。API Key 只进入当前检测子进程环境，不写入报告、任务历史或浏览器本地存储。目标 API 仅允许公网 HTTPS 地址。
 
 本地开发：
 
@@ -387,6 +387,6 @@ docker compose up -d
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements-dev.txt
-uvicorn webapp.main:app --reload
+APP_BROWSER_SECRET=test-browser-secret-with-at-least-32-characters uvicorn webapp.main:app --reload
 pytest
 ```
