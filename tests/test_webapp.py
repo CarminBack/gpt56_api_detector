@@ -3,9 +3,6 @@ import os
 from pathlib import Path
 import sys
 
-os.environ.setdefault("APP_USERNAME", "tester")
-os.environ.setdefault("APP_PASSWORD", "test-password")
-os.environ.setdefault("APP_SESSION_SECRET", "test-session-secret-with-at-least-32-characters")
 os.environ.setdefault("REPORT_DIR", "/tmp/gpt56-detector-test-reports")
 
 from fastapi.testclient import TestClient
@@ -22,52 +19,23 @@ def test_health_check_does_not_require_auth() -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_dashboard_uses_login_page_and_secure_session_cookie() -> None:
-    with TestClient(app, base_url="https://testserver") as web:
-        unauthorized = web.get("/", follow_redirects=False)
-        assert unauthorized.status_code == 303
-        assert unauthorized.headers["location"] == "/login"
+def test_dashboard_and_api_require_no_authentication() -> None:
+    dashboard = client.get("/")
+    assert dashboard.status_code == 200
+    assert "GPT-5.6 路由检测" in dashboard.text
 
-        login_page = web.get("/login")
-        assert login_page.status_code == 200
-        assert 'id="login-form"' in login_page.text
+    jobs = client.get("/api/jobs")
+    assert jobs.status_code == 200
 
-        rejected = web.post(
-            "/api/login", json={"username": "tester", "password": "wrong"}
-        )
-        assert rejected.status_code == 401
-        assert "www-authenticate" not in rejected.headers
-
-        accepted = web.post(
-            "/api/login", json={"username": "tester", "password": "test-password"}
-        )
-        assert accepted.status_code == 200
-        cookie = accepted.headers["set-cookie"].lower()
-        assert "httponly" in cookie
-        assert "secure" in cookie
-        assert "samesite=strict" in cookie
-
-        dashboard = web.get("/")
-        assert dashboard.status_code == 200
-        assert "GPT-5.6 路由检测" in dashboard.text
-
-
-def test_api_rejects_missing_session_without_basic_auth_challenge() -> None:
-    with TestClient(app, base_url="https://testserver") as web:
-        response = web.get("/api/jobs")
-        assert response.status_code == 401
-        assert "www-authenticate" not in response.headers
+    login = client.get("/login")
+    assert login.status_code == 404
 
 
 def test_dashboard_has_visible_model_selectors() -> None:
-    with TestClient(app, base_url="https://testserver") as web:
-        web.post(
-            "/api/login", json={"username": "tester", "password": "test-password"}
-        )
-        dashboard = web.get("/")
-        assert 'id="candidate-model-select"' in dashboard.text
-        assert 'id="trusted-model-select"' in dashboard.text
-        assert "<datalist" not in dashboard.text
+    dashboard = client.get("/")
+    assert 'id="candidate-model-select"' in dashboard.text
+    assert 'id="trusted-model-select"' in dashboard.text
+    assert "<datalist" not in dashboard.text
 
 
 def test_private_or_non_https_targets_are_rejected() -> None:

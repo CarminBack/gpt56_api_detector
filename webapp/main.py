@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
-import hmac
 import ipaddress
 import json
 import os
@@ -12,15 +9,14 @@ import signal
 import socket
 import subprocess
 import sys
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib import error, parse, request
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, SecretStr, model_validator
 
 
@@ -30,55 +26,7 @@ STATIC_DIR = APP_DIR / "static"
 REPORT_DIR = Path(os.getenv("REPORT_DIR", PROJECT_DIR / "reports")).resolve()
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-AUTH_USERNAME = os.getenv("APP_USERNAME", "")
-AUTH_PASSWORD = os.getenv("APP_PASSWORD", "")
-SESSION_SECRET = os.getenv("APP_SESSION_SECRET", "")
-if not AUTH_USERNAME or not AUTH_PASSWORD or len(SESSION_SECRET) < 32:
-    raise RuntimeError(
-        "APP_USERNAME, APP_PASSWORD and a 32+ character APP_SESSION_SECRET are required"
-    )
-
-SESSION_COOKIE = "gpt56_session"
-SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 app = FastAPI(title="GPT-5.6 Detector", docs_url=None, redoc_url=None)
-
-
-def create_session_token(username: str) -> str:
-    expires_at = int(time.time()) + SESSION_TTL_SECONDS
-    payload = base64.urlsafe_b64encode(
-        f"{username}:{expires_at}".encode()
-    ).rstrip(b"=").decode()
-    signature = hmac.new(
-        SESSION_SECRET.encode(), payload.encode(), hashlib.sha256
-    ).hexdigest()
-    return f"{payload}.{signature}"
-
-
-def session_username(token: str | None) -> str | None:
-    if not token:
-        return None
-    try:
-        payload, signature = token.rsplit(".", 1)
-        expected = hmac.new(
-            SESSION_SECRET.encode(), payload.encode(), hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(signature, expected):
-            return None
-        padding = "=" * (-len(payload) % 4)
-        decoded = base64.urlsafe_b64decode(payload + padding).decode()
-        username, expires_at = decoded.rsplit(":", 1)
-        if int(expires_at) < int(time.time()) or username != AUTH_USERNAME:
-            return None
-        return username
-    except (UnicodeDecodeError, ValueError):
-        return None
-
-
-def require_auth(request: Request) -> str:
-    username = session_username(request.cookies.get(SESSION_COOKIE))
-    if not username:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
-    return username
 
 
 def utc_now() -> str:
@@ -135,11 +83,6 @@ class JobInput(BaseModel):
 class ModelsInput(BaseModel):
     base_url: str = Field(min_length=8, max_length=500)
     api_key: SecretStr
-
-
-class LoginInput(BaseModel):
-    username: str = Field(min_length=1, max_length=200)
-    password: SecretStr
 
 
 @dataclass
@@ -418,46 +361,8 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/login", response_model=None)
-async def login_page(request: Request) -> FileResponse | RedirectResponse:
-    if session_username(request.cookies.get(SESSION_COOKIE)):
-        return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
-    return FileResponse(STATIC_DIR / "login.html")
-
-
-@app.post("/api/login")
-async def login(payload: LoginInput) -> JSONResponse:
-    username_ok = hmac.compare_digest(payload.username.encode(), AUTH_USERNAME.encode())
-    password_ok = hmac.compare_digest(
-        payload.password.get_secret_value().encode(), AUTH_PASSWORD.encode()
-    )
-    if not username_ok or not password_ok:
-        raise HTTPException(status_code=401, detail="账号或密码不正确")
-
-    response = JSONResponse({"authenticated": True})
-    response.set_cookie(
-        SESSION_COOKIE,
-        create_session_token(AUTH_USERNAME),
-        max_age=SESSION_TTL_SECONDS,
-        httponly=True,
-        secure=True,
-        samesite="strict",
-        path="/",
-    )
-    return response
-
-
-@app.post("/api/logout")
-async def logout(_: str = Depends(require_auth)) -> JSONResponse:
-    response = JSONResponse({"authenticated": False})
-    response.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True)
-    return response
-
-
-@app.get("/", response_model=None)
-async def index(request: Request) -> FileResponse | RedirectResponse:
-    if not session_username(request.cookies.get(SESSION_COOKIE)):
-        return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
+@app.get("/")
+async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
@@ -466,8 +371,6 @@ async def asset(filename: str) -> FileResponse:
     if filename not in {
         "styles.css",
         "app.js",
-        "login.css",
-        "login.js",
         "favicon.svg",
     }:
         raise HTTPException(404)
@@ -475,7 +378,7 @@ async def asset(filename: str) -> FileResponse:
 
 
 @app.post("/api/models")
-async def list_models(payload: ModelsInput, _: str = Depends(require_auth)) -> dict[str, Any]:
+async def list_models(payload: ModelsInput) -> dict[str, Any]:
     try:
         base_url = await asyncio.to_thread(validate_public_https_url, payload.base_url)
         models = await asyncio.to_thread(
@@ -487,13 +390,13 @@ async def list_models(payload: ModelsInput, _: str = Depends(require_auth)) -> d
 
 
 @app.get("/api/jobs")
-async def list_jobs(_: str = Depends(require_auth)) -> dict[str, Any]:
+async def list_jobs() -> dict[str, Any]:
     jobs = sorted(manager.jobs.values(), key=lambda item: item.created_at, reverse=True)
     return {"jobs": [job.public() for job in jobs[:100]], "active_id": manager.active_id}
 
 
 @app.post("/api/jobs", status_code=202)
-async def create_job(payload: JobInput, _: str = Depends(require_auth)) -> dict[str, Any]:
+async def create_job(payload: JobInput) -> dict[str, Any]:
     try:
         job = await manager.start(payload)
     except ValueError as exc:
@@ -502,7 +405,7 @@ async def create_job(payload: JobInput, _: str = Depends(require_auth)) -> dict[
 
 
 @app.get("/api/jobs/{job_id}")
-async def get_job(job_id: str, _: str = Depends(require_auth)) -> dict[str, Any]:
+async def get_job(job_id: str) -> dict[str, Any]:
     job = manager.jobs.get(job_id)
     if not job:
         raise HTTPException(404, "任务不存在")
@@ -510,9 +413,7 @@ async def get_job(job_id: str, _: str = Depends(require_auth)) -> dict[str, Any]
 
 
 @app.get("/api/jobs/{job_id}/logs")
-async def get_logs(
-    job_id: str, offset: int = 0, _: str = Depends(require_auth)
-) -> dict[str, Any]:
+async def get_logs(job_id: str, offset: int = 0) -> dict[str, Any]:
     job = manager.jobs.get(job_id)
     if not job:
         raise HTTPException(404, "任务不存在")
@@ -521,13 +422,13 @@ async def get_logs(
 
 
 @app.post("/api/jobs/{job_id}/stop", status_code=202)
-async def stop_job(job_id: str, _: str = Depends(require_auth)) -> dict[str, Any]:
+async def stop_job(job_id: str) -> dict[str, Any]:
     job = await manager.stop(job_id)
     return job.public()
 
 
 @app.get("/api/jobs/{job_id}/report.html")
-async def report_html(job_id: str, _: str = Depends(require_auth)) -> FileResponse:
+async def report_html(job_id: str) -> FileResponse:
     job = manager.jobs.get(job_id)
     if not job or not job.report_html or not job.report_html.exists():
         raise HTTPException(404, "HTML 报告不存在")
@@ -535,7 +436,7 @@ async def report_html(job_id: str, _: str = Depends(require_auth)) -> FileRespon
 
 
 @app.get("/api/jobs/{job_id}/report.json")
-async def report_json(job_id: str, _: str = Depends(require_auth)) -> FileResponse:
+async def report_json(job_id: str) -> FileResponse:
     job = manager.jobs.get(job_id)
     if not job or not job.report_json or not job.report_json.exists():
         raise HTTPException(404, "JSON 报告不存在")

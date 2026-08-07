@@ -370,17 +370,16 @@ juice 不能单独让综合检测通过。即使 juice 看起来像 Sol，也必
 
 详细技术分析见 [TECHNICAL_REPORT_CN.md](TECHNICAL_REPORT_CN.md)，持续监控说明见 [MONITORING_CN.md](MONITORING_CN.md)。
 
-## 私有 Web 面板
+## Web 面板
 
-本 fork 增加了一个适合私有部署的 Web 操作面板，复用原有检测脚本，支持 Juice-only、COT 综合检测、模型列表读取、实时日志、停止任务和脱敏历史报告。
+本 fork 增加了一个 Web 操作面板，复用原有检测脚本，支持 Juice-only、COT 综合检测、模型列表读取、实时日志、停止任务和脱敏历史报告。
 
 ```bash
 cp .env.example .env
-# 修改 .env 中的登录账号、长随机密码和会话签名密钥
 docker compose up -d
 ```
 
-默认仅监听 `127.0.0.1:3056`，应通过带 HTTPS 的反向代理访问。Web 服务使用站内登录页和签名的 HttpOnly 会话 Cookie，API Key 只进入当前检测子进程环境，不写入报告、任务历史或浏览器本地存储。目标 API 仅允许公网 HTTPS 地址。
+默认仅监听 `127.0.0.1:3056`，应通过带 HTTPS 的反向代理访问。Web 服务不要求登录；API Key 只进入当前检测子进程环境，不写入报告、任务历史或浏览器本地存储。目标 API 仅允许公网 HTTPS 地址。
 
 本地开发：
 
@@ -388,6 +387,6 @@ docker compose up -d
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements-dev.txt
-APP_USERNAME=test APP_PASSWORD=test-password APP_SESSION_SECRET=test-session-secret-with-at-least-32-characters uvicorn webapp.main:app --reload
+uvicorn webapp.main:app --reload
 pytest
 ```

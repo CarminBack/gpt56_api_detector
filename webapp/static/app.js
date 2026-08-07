@@ -17,10 +17,6 @@ async function api(path, options = {}) {
   });
   const contentType = response.headers.get("content-type") || "";
   const payload = contentType.includes("application/json") ? await response.json() : null;
-  if (response.status === 401) {
-    window.location.replace("/login");
-    throw new Error("登录已过期");
-  }
   if (!response.ok) {
     throw new Error(payload?.detail || `请求失败：HTTP ${response.status}`);
   }
@@ -351,13 +347,5 @@ el("workers").addEventListener("input", (event) => {
 el("job-form").addEventListener("submit", startJob);
 el("stop-button").addEventListener("click", stopJob);
 el("refresh-history").addEventListener("click", refreshHistory);
-el("logout-button").addEventListener("click", async () => {
-  try {
-    await api("/api/logout", { method: "POST" });
-  } finally {
-    window.location.replace("/login");
-  }
-});
-
 setMode("juice");
 refreshHistory();
