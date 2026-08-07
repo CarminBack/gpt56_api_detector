@@ -1,0 +1,19 @@
+services:
+  detector:
+    image: ${DETECTOR_IMAGE:-ghcr.io/carminback/gpt56_api_detector:latest}
+    container_name: gpt56-api-detector
+    restart: unless-stopped
+    environment:
+      APP_USERNAME: ${APP_USERNAME:?APP_USERNAME is required}
+      APP_PASSWORD: ${APP_PASSWORD:?APP_PASSWORD is required}
+      REPORT_DIR: /data/reports
+    ports:
+      - "127.0.0.1:${DETECTOR_PORT:-3056}:8000"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

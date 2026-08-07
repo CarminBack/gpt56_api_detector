@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>GPT-5.6 路由检测</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+
+  <svg class="icon-sprite" aria-hidden="true">
+    <symbol id="icon-activity" viewBox="0 0 24 24">
+      <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+    </symbol>
+    <symbol id="icon-play" viewBox="0 0 24 24">
+      <path d="m6 3 14 9-14 9z"/>
+    </symbol>
+    <symbol id="icon-stop" viewBox="0 0 24 24">
+      <rect width="14" height="14" x="5" y="5" rx="1"/>
+    </symbol>
+    <symbol id="icon-refresh" viewBox="0 0 24 24">
+      <path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/>
+    </symbol>
+    <symbol id="icon-external" viewBox="0 0 24 24">
+      <path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+    </symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+    </symbol>
+    <symbol id="icon-eye" viewBox="0 0 24 24">
+      <path d="M2.1 12a10.9 10.9 0 0 1 19.8 0 10.9 10.9 0 0 1-19.8 0Z"/><circle cx="12" cy="12" r="3"/>
+    </symbol>
+    <symbol id="icon-eye-off" viewBox="0 0 24 24">
+      <path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.9 4.2A10.8 10.8 0 0 1 22 12a11.8 11.8 0 0 1-2 2.9M6.6 6.6A11.4 11.4 0 0 0 2 12a10.9 10.9 0 0 0 13.4 6.5"/>
+    </symbol>
+    <symbol id="icon-clock" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
+    </symbol>
+  </svg>
+
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><svg><use href="#icon-activity"/></svg></span>
+      <div>
+        <h1>GPT-5.6 路由检测</h1>
+        <p>Encrypted COT · Juice fingerprint</p>
+      </div>
+    </div>
+    <div class="service-state"><span class="state-dot"></span>服务在线</div>
+  </header>
+
+  <main id="main" class="workspace">
+    <aside class="control-panel" aria-labelledby="settings-title">
+      <div class="panel-heading">
+        <div>
+          <p class="eyebrow">NEW TEST</p>
+          <h2 id="settings-title">检测设置</h2>
+        </div>
+      </div>
+
+      <form id="job-form">
+        <fieldset class="field-group mode-group">
+          <legend>检测模式</legend>
+          <div class="segmented" role="radiogroup" aria-label="检测模式">
+            <button type="button" class="segment is-active" data-mode="juice" role="radio" aria-checked="true">Juice</button>
+            <button type="button" class="segment" data-mode="cot" role="radio" aria-checked="false">COT 综合</button>
+          </div>
+        </fieldset>
+
+        <fieldset class="field-group">
+          <legend>待测接口</legend>
+          <label for="candidate-url">Base URL</label>
+          <input id="candidate-url" name="candidate-url" type="url" inputmode="url" autocomplete="url" placeholder="https://api.example.com/v1" required>
+
+          <div class="label-row">
+            <label for="candidate-model">模型名</label>
+            <button class="text-button" type="button" data-load-models="candidate">
+              <svg aria-hidden="true"><use href="#icon-refresh"/></svg>读取模型
+            </button>
+          </div>
+          <input id="candidate-model" name="candidate-model" list="candidate-models" autocomplete="off" value="gpt-5.6-sol" required>
+          <datalist id="candidate-models"></datalist>
+
+          <label for="candidate-key">API Key</label>
+          <div class="secret-input">
+            <input id="candidate-key" name="candidate-key" type="password" autocomplete="off" spellcheck="false" required>
+            <button type="button" class="icon-button" data-toggle-secret="candidate-key" title="显示或隐藏待测端 Key" aria-label="显示或隐藏待测端 Key">
+              <svg aria-hidden="true"><use href="#icon-eye"/></svg>
+            </button>
+          </div>
+        </fieldset>
+
+        <fieldset id="trusted-fields" class="field-group is-hidden">
+          <legend>可信参照端</legend>
+          <label for="trusted-url">Base URL</label>
+          <input id="trusted-url" name="trusted-url" type="url" inputmode="url" autocomplete="url" placeholder="https://api.openai.com/v1">
+
+          <div class="label-row">
+            <label for="trusted-model">模型名</label>
+            <button class="text-button" type="button" data-load-models="trusted">
+              <svg aria-hidden="true"><use href="#icon-refresh"/></svg>读取模型
+            </button>
+          </div>
+          <input id="trusted-model" name="trusted-model" list="trusted-models" autocomplete="off" value="gpt-5.6-sol">
+          <datalist id="trusted-models"></datalist>
+
+          <label for="trusted-key">API Key</label>
+          <div class="secret-input">
+            <input id="trusted-key" name="trusted-key" type="password" autocomplete="off" spellcheck="false">
+            <button type="button" class="icon-button" data-toggle-secret="trusted-key" title="显示或隐藏可信端 Key" aria-label="显示或隐藏可信端 Key">
+              <svg aria-hidden="true"><use href="#icon-eye"/></svg>
+            </button>
+          </div>
+        </fieldset>
+
+        <fieldset class="field-group compact-options">
+          <legend>执行参数</legend>
+          <div class="option-grid">
+            <label for="workers">并发</label>
+            <div class="range-row">
+              <input id="workers" name="workers" type="range" min="1" max="8" value="4">
+              <output id="workers-value" for="workers">4</output>
+            </div>
+
+            <label for="juice-repeats">每档样本</label>
+            <input id="juice-repeats" name="juice-repeats" type="number" min="1" max="5" value="3">
+
+            <label id="trials-label" for="trials" class="is-hidden">COT 轮次</label>
+            <input id="trials" name="trials" class="is-hidden" type="number" min="4" max="20" value="20">
+          </div>
+        </fieldset>
+
+        <p class="privacy-note">Key 仅传入当前检测子进程，不写入历史报告。</p>
+        <button id="start-button" class="primary-button" type="submit">
+          <svg aria-hidden="true"><use href="#icon-play"/></svg>
+          开始检测
+        </button>
+      </form>
+    </aside>
+
+    <div class="results-column">
+      <section class="run-section" aria-labelledby="run-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">CURRENT RUN</p>
+            <h2 id="run-title">当前任务</h2>
+          </div>
+          <div class="run-actions">
+            <button id="stop-button" class="secondary-button danger" type="button" disabled>
+              <svg aria-hidden="true"><use href="#icon-stop"/></svg>停止
+            </button>
+            <a id="html-report" class="secondary-button is-disabled" href="#" target="_blank" rel="noopener">
+              <svg aria-hidden="true"><use href="#icon-external"/></svg>HTML
+            </a>
+            <a id="json-report" class="icon-button report-download is-disabled" href="#" title="下载 JSON 报告" aria-label="下载 JSON 报告">
+              <svg aria-hidden="true"><use href="#icon-download"/></svg>
+            </a>
+          </div>
+        </div>
+
+        <div id="empty-run" class="empty-state">
+          <svg aria-hidden="true"><use href="#icon-activity"/></svg>
+          <p>暂无检测任务</p>
+        </div>
+
+        <div id="run-content" class="is-hidden">
+          <div id="verdict-band" class="verdict-band tone-neutral">
+            <div>
+              <span id="run-status" class="status-label">等待中</span>
+              <h3 id="verdict-title">任务准备中</h3>
+              <p id="verdict-detail">检测器即将启动。</p>
+            </div>
+            <span id="verdict-pass" class="verdict-mark">—</span>
+          </div>
+
+          <dl class="metric-strip">
+            <div><dt>型号指纹</dt><dd id="metric-model">—</dd></div>
+            <div><dt>置信度</dt><dd id="metric-confidence">—</dd></div>
+            <div><dt>线路质量</dt><dd id="metric-network">—</dd></div>
+            <div><dt>运行时间</dt><dd id="metric-time" class="tabular">—</dd></div>
+          </dl>
+
+          <div class="log-header">
+            <h3>实时日志</h3>
+            <span id="log-count" class="tabular">0 行</span>
+          </div>
+          <pre id="log-output" class="log-output" tabindex="0" aria-live="polite">等待任务输出…</pre>
+        </div>
+      </section>
+
+      <section class="history-section" aria-labelledby="history-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">REPORTS</p>
+            <h2 id="history-title">历史报告</h2>
+          </div>
+          <button id="refresh-history" class="icon-button" type="button" title="刷新历史报告" aria-label="刷新历史报告">
+            <svg aria-hidden="true"><use href="#icon-refresh"/></svg>
+          </button>
+        </div>
+        <div id="history-list" class="history-list">
+          <p class="history-empty">暂无历史报告</p>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

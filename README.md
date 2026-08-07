@@ -369,3 +369,25 @@ juice 不能单独让综合检测通过。即使 juice 看起来像 Sol，也必
 单次检测默认运行 20 个强挑战，并对五档 juice 各测试 3 次。只运行 COT 强检测可以使用 `--no-juice`；只运行 Juice 可以使用 `--juice-only`，此时无需 `--trusted-base-url`，但不能得出加密状态能力结论。持续监控同样支持 `--juice-only`。
 
 详细技术分析见 [TECHNICAL_REPORT_CN.md](TECHNICAL_REPORT_CN.md)，持续监控说明见 [MONITORING_CN.md](MONITORING_CN.md)。
+
+## 私有 Web 面板
+
+本 fork 增加了一个适合私有部署的 Web 操作面板，复用原有检测脚本，支持 Juice-only、COT 综合检测、模型列表读取、实时日志、停止任务和脱敏历史报告。
+
+```bash
+cp .env.example .env
+# 修改 .env 中的登录账号和长随机密码
+docker compose up -d
+```
+
+默认仅监听 `127.0.0.1:3056`，应通过带 HTTPS 的反向代理访问。Web 服务使用 HTTP Basic Auth，API Key 只进入当前检测子进程环境，不写入报告、任务历史或浏览器本地存储。目标 API 仅允许公网 HTTPS 地址。
+
+本地开发：
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements-dev.txt
+APP_USERNAME=test APP_PASSWORD=test-password uvicorn webapp.main:app --reload
+pytest
+```
