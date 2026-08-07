@@ -376,11 +376,11 @@ juice 不能单独让综合检测通过。即使 juice 看起来像 Sol，也必
 
 ```bash
 cp .env.example .env
-# 修改 .env 中的登录账号和长随机密码
+# 修改 .env 中的登录账号、长随机密码和会话签名密钥
 docker compose up -d
 ```
 
-默认仅监听 `127.0.0.1:3056`，应通过带 HTTPS 的反向代理访问。Web 服务使用 HTTP Basic Auth，API Key 只进入当前检测子进程环境，不写入报告、任务历史或浏览器本地存储。目标 API 仅允许公网 HTTPS 地址。
+默认仅监听 `127.0.0.1:3056`，应通过带 HTTPS 的反向代理访问。Web 服务使用站内登录页和签名的 HttpOnly 会话 Cookie，API Key 只进入当前检测子进程环境，不写入报告、任务历史或浏览器本地存储。目标 API 仅允许公网 HTTPS 地址。
 
 本地开发：
 
@@ -388,6 +388,6 @@ docker compose up -d
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements-dev.txt
-APP_USERNAME=test APP_PASSWORD=test-password uvicorn webapp.main:app --reload
+APP_USERNAME=test APP_PASSWORD=test-password APP_SESSION_SECRET=test-session-secret-with-at-least-32-characters uvicorn webapp.main:app --reload
 pytest
 ```

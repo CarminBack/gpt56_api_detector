@@ -17,6 +17,10 @@ async function api(path, options = {}) {
   });
   const contentType = response.headers.get("content-type") || "";
   const payload = contentType.includes("application/json") ? await response.json() : null;
+  if (response.status === 401) {
+    window.location.replace("/login");
+    throw new Error("登录已过期");
+  }
   if (!response.ok) {
     throw new Error(payload?.detail || `请求失败：HTTP ${response.status}`);
   }
@@ -68,13 +72,22 @@ async function loadModels(kind, button) {
       method: "POST",
       body: JSON.stringify({ base_url: baseUrl, api_key: apiKey }),
     });
-    const datalist = el(`${kind}-models`);
-    datalist.replaceChildren();
+    const select = el(`${kind}-model-select`);
+    select.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = result.models.length ? "选择已读取的模型" : "未读取到模型";
+    select.append(placeholder);
     result.models.forEach((model) => {
       const option = document.createElement("option");
       option.value = model;
-      datalist.append(option);
+      option.textContent = model;
+      select.append(option);
     });
+    select.disabled = result.models.length === 0;
+    const currentModel = el(`${kind}-model`).value.trim();
+    select.value = result.models.includes(currentModel) ? currentModel : "";
+    if (!select.disabled) select.focus();
     showToast(`读取到 ${result.models.length} 个模型`);
   } catch (error) {
     showToast(error.message, true);
@@ -325,6 +338,12 @@ document.querySelectorAll("[data-load-models]").forEach((button) => {
   button.addEventListener("click", () => loadModels(button.dataset.loadModels, button));
 });
 
+document.querySelectorAll("[data-model-select]").forEach((select) => {
+  select.addEventListener("change", () => {
+    if (select.value) el(`${select.dataset.modelSelect}-model`).value = select.value;
+  });
+});
+
 el("workers").addEventListener("input", (event) => {
   el("workers-value").value = event.target.value;
   el("workers-value").textContent = event.target.value;
@@ -332,6 +351,13 @@ el("workers").addEventListener("input", (event) => {
 el("job-form").addEventListener("submit", startJob);
 el("stop-button").addEventListener("click", stopJob);
 el("refresh-history").addEventListener("click", refreshHistory);
+el("logout-button").addEventListener("click", async () => {
+  try {
+    await api("/api/logout", { method: "POST" });
+  } finally {
+    window.location.replace("/login");
+  }
+});
 
 setMode("juice");
 refreshHistory();

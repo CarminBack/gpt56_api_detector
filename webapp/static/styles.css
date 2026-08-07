@@ -41,7 +41,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
   letter-spacing: 0;
 }
@@ -150,6 +151,30 @@ svg {
   font-size: 12px;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-icon-button {
+  width: 44px;
+  min-height: 44px;
+  display: grid;
+  place-items: center;
+  color: #dbe6e2;
+  background: transparent;
+  border: 1px solid #4c6e63;
+  border-radius: 5px;
+  transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease;
+}
+
+.header-icon-button:hover {
+  color: #fff;
+  background: #314a43;
+  border-color: #6b8d82;
+}
+
 .state-dot {
   width: 8px;
   height: 8px;
@@ -238,7 +263,8 @@ input[type="url"],
 input[type="text"],
 input[type="password"],
 input[list],
-input[type="number"] {
+input[type="number"],
+select {
   width: 100%;
   min-height: 44px;
   padding: 9px 11px;
@@ -255,6 +281,26 @@ input:hover {
 input:focus {
   border-color: var(--focus);
   background: #fff;
+}
+
+select:focus {
+  border-color: var(--focus);
+  background: #fff;
+}
+
+select:disabled {
+  cursor: not-allowed;
+  color: var(--muted);
+  background: var(--surface-muted);
+  opacity: 0.75;
+}
+
+.model-select-label {
+  margin-top: 8px !important;
+}
+
+.model-select {
+  appearance: auto;
 }
 
 .mode-group {

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>登录 · GPT-5.6 路由检测</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/login.css">
+</head>
+<body>
+  <main class="login-shell">
+    <section class="login-panel" aria-labelledby="login-title">
+      <header class="login-brand">
+        <img src="/assets/favicon.svg" width="44" height="44" alt="">
+        <div>
+          <p>SECURE ACCESS</p>
+          <h1 id="login-title">GPT-5.6 路由检测</h1>
+        </div>
+      </header>
+
+      <form id="login-form" novalidate>
+        <label for="username">账号</label>
+        <input id="username" name="username" type="text" autocomplete="username" required autofocus>
+
+        <label for="password">密码</label>
+        <div class="password-field">
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+          <button id="toggle-password" class="icon-button" type="button" title="显示密码" aria-label="显示密码">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M2.1 12a10.9 10.9 0 0 1 19.8 0 10.9 10.9 0 0 1-19.8 0Z"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+          </button>
+        </div>
+
+        <p id="login-error" class="form-error" role="alert" hidden></p>
+        <button id="login-button" class="login-button" type="submit">登录</button>
+      </form>
+    </section>
+  </main>
+  <script src="/assets/login.js" defer></script>
+</body>
+</html>

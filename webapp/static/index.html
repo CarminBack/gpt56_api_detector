@@ -39,6 +39,9 @@
     <symbol id="icon-clock" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
     </symbol>
+    <symbol id="icon-log-out" viewBox="0 0 24 24">
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
+    </symbol>
   </svg>
 
   <header class="app-header">
@@ -49,7 +52,12 @@
         <p>Encrypted COT · Juice fingerprint</p>
       </div>
     </div>
-    <div class="service-state"><span class="state-dot"></span>服务在线</div>
+    <div class="header-actions">
+      <div class="service-state"><span class="state-dot"></span>服务在线</div>
+      <button id="logout-button" class="header-icon-button" type="button" title="退出登录" aria-label="退出登录">
+        <svg aria-hidden="true"><use href="#icon-log-out"/></svg>
+      </button>
+    </div>
   </header>
 
   <main id="main" class="workspace">
@@ -81,8 +89,11 @@
               <svg aria-hidden="true"><use href="#icon-refresh"/></svg>读取模型
             </button>
           </div>
-          <input id="candidate-model" name="candidate-model" list="candidate-models" autocomplete="off" value="gpt-5.6-sol" required>
-          <datalist id="candidate-models"></datalist>
+          <input id="candidate-model" name="candidate-model" autocomplete="off" value="gpt-5.6-sol" required>
+          <label class="model-select-label" for="candidate-model-select">模型列表</label>
+          <select id="candidate-model-select" class="model-select" data-model-select="candidate" disabled>
+            <option value="">读取后可选择</option>
+          </select>
 
           <label for="candidate-key">API Key</label>
           <div class="secret-input">
@@ -104,8 +115,11 @@
               <svg aria-hidden="true"><use href="#icon-refresh"/></svg>读取模型
             </button>
           </div>
-          <input id="trusted-model" name="trusted-model" list="trusted-models" autocomplete="off" value="gpt-5.6-sol">
-          <datalist id="trusted-models"></datalist>
+          <input id="trusted-model" name="trusted-model" autocomplete="off" value="gpt-5.6-sol">
+          <label class="model-select-label" for="trusted-model-select">模型列表</label>
+          <select id="trusted-model-select" class="model-select" data-model-select="trusted" disabled>
+            <option value="">读取后可选择</option>
+          </select>
 
           <label for="trusted-key">API Key</label>
           <div class="secret-input">

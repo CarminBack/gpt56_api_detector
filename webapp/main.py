@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -10,15 +12,15 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib import error, parse, request
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, SecretStr, model_validator
 
 
@@ -30,27 +32,53 @@ REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 AUTH_USERNAME = os.getenv("APP_USERNAME", "")
 AUTH_PASSWORD = os.getenv("APP_PASSWORD", "")
-if not AUTH_USERNAME or not AUTH_PASSWORD:
-    raise RuntimeError("APP_USERNAME and APP_PASSWORD are required")
+SESSION_SECRET = os.getenv("APP_SESSION_SECRET", "")
+if not AUTH_USERNAME or not AUTH_PASSWORD or len(SESSION_SECRET) < 32:
+    raise RuntimeError(
+        "APP_USERNAME, APP_PASSWORD and a 32+ character APP_SESSION_SECRET are required"
+    )
 
-security = HTTPBasic(auto_error=False)
+SESSION_COOKIE = "gpt56_session"
+SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 app = FastAPI(title="GPT-5.6 Detector", docs_url=None, redoc_url=None)
 
 
-def require_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -> str:
-    if credentials is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    username_ok = hmac.compare_digest(credentials.username.encode(), AUTH_USERNAME.encode())
-    password_ok = hmac.compare_digest(credentials.password.encode(), AUTH_PASSWORD.encode())
-    if not username_ok or not password_ok:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credentials.username
+def create_session_token(username: str) -> str:
+    expires_at = int(time.time()) + SESSION_TTL_SECONDS
+    payload = base64.urlsafe_b64encode(
+        f"{username}:{expires_at}".encode()
+    ).rstrip(b"=").decode()
+    signature = hmac.new(
+        SESSION_SECRET.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def session_username(token: str | None) -> str | None:
+    if not token:
+        return None
+    try:
+        payload, signature = token.rsplit(".", 1)
+        expected = hmac.new(
+            SESSION_SECRET.encode(), payload.encode(), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        padding = "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(payload + padding).decode()
+        username, expires_at = decoded.rsplit(":", 1)
+        if int(expires_at) < int(time.time()) or username != AUTH_USERNAME:
+            return None
+        return username
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+
+def require_auth(request: Request) -> str:
+    username = session_username(request.cookies.get(SESSION_COOKIE))
+    if not username:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    return username
 
 
 def utc_now() -> str:
@@ -107,6 +135,11 @@ class JobInput(BaseModel):
 class ModelsInput(BaseModel):
     base_url: str = Field(min_length=8, max_length=500)
     api_key: SecretStr
+
+
+class LoginInput(BaseModel):
+    username: str = Field(min_length=1, max_length=200)
+    password: SecretStr
 
 
 @dataclass
@@ -385,14 +418,58 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/")
-async def index(_: str = Depends(require_auth)) -> FileResponse:
+@app.get("/login", response_model=None)
+async def login_page(request: Request) -> FileResponse | RedirectResponse:
+    if session_username(request.cookies.get(SESSION_COOKIE)):
+        return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+    return FileResponse(STATIC_DIR / "login.html")
+
+
+@app.post("/api/login")
+async def login(payload: LoginInput) -> JSONResponse:
+    username_ok = hmac.compare_digest(payload.username.encode(), AUTH_USERNAME.encode())
+    password_ok = hmac.compare_digest(
+        payload.password.get_secret_value().encode(), AUTH_PASSWORD.encode()
+    )
+    if not username_ok or not password_ok:
+        raise HTTPException(status_code=401, detail="账号或密码不正确")
+
+    response = JSONResponse({"authenticated": True})
+    response.set_cookie(
+        SESSION_COOKIE,
+        create_session_token(AUTH_USERNAME),
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/logout")
+async def logout(_: str = Depends(require_auth)) -> JSONResponse:
+    response = JSONResponse({"authenticated": False})
+    response.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True)
+    return response
+
+
+@app.get("/", response_model=None)
+async def index(request: Request) -> FileResponse | RedirectResponse:
+    if not session_username(request.cookies.get(SESSION_COOKIE)):
+        return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
     return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.get("/assets/{filename}")
-async def asset(filename: str, _: str = Depends(require_auth)) -> FileResponse:
-    if filename not in {"styles.css", "app.js", "favicon.svg"}:
+async def asset(filename: str) -> FileResponse:
+    if filename not in {
+        "styles.css",
+        "app.js",
+        "login.css",
+        "login.js",
+        "favicon.svg",
+    }:
         raise HTTPException(404)
     return FileResponse(STATIC_DIR / filename)
 

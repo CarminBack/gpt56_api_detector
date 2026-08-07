@@ -6,6 +6,7 @@ services:
     environment:
       APP_USERNAME: ${APP_USERNAME:?APP_USERNAME is required}
       APP_PASSWORD: ${APP_PASSWORD:?APP_PASSWORD is required}
+      APP_SESSION_SECRET: ${APP_SESSION_SECRET:?APP_SESSION_SECRET is required}
       REPORT_DIR: /data/reports
     ports:
       - "127.0.0.1:${DETECTOR_PORT:-3056}:8000"
