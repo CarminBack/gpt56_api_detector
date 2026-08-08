@@ -1,6 +1,6 @@
 # GPT-5.6 vNext 混用检测器
 
-这是一个面向 OpenAI-compatible API 中转服务的本地检测工具。它不要求你提供“可信 API”，而是通过 Juice、固定输出、提示覆盖检查和经过可信三模型标定的行为分布，寻找 GPT-5.6 Sol、Terra、Luna 或旧型号被混用的证据。
+这是一个面向 OpenAI-compatible API 中转服务的本地检测工具。它不要求你提供“可信 API”，而是通过 Juice、固定输出、提示覆盖检查和经过可信三模型标定的行为分布，寻找 GPT-5.6 Sol、Terra、Luna 或旧型号被混用的证据。友情链接：https://linux.do/t/topic/2704354
 
 > 当前版本：`4.0.0`
 >
