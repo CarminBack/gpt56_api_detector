@@ -1,11 +1,10 @@
 @echo off
-chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-
-where pyw >nul 2>nul
-if %errorlevel% equ 0 (
-    start "" pyw -3 gpt56_gui.py
+where py >nul 2>nul
+if %errorlevel%==0 (
+  py -3 gpt56_vnext_web.py
 ) else (
-    start "" pythonw gpt56_gui.py
+  python gpt56_vnext_web.py
 )
+if errorlevel 1 pause
