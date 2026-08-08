@@ -126,8 +126,6 @@ async function startJob(event) {
       method: "POST",
       body: JSON.stringify(jobPayload()),
     });
-    el("candidate-key").value = "";
-    el("trusted-key").value = "";
     selectJob(job.id, true);
     showToast("检测任务已启动");
   } catch (error) {
@@ -282,11 +280,35 @@ function renderHistory(jobs) {
     button.className = "history-item";
     button.addEventListener("click", () => selectJob(job.id));
 
+    const main = document.createElement("span");
+    main.className = "history-main";
+    const title = document.createElement("span");
+    title.className = "history-title-row";
     const model = document.createElement("strong");
     model.textContent = job.config.candidate_model || "未知模型";
     const mode = document.createElement("span");
     mode.className = "history-mode";
     mode.textContent = job.config.mode === "juice" || job.config.mode === "juice_only" ? "Juice" : "COT 综合";
+    title.append(model, mode);
+
+    const endpoints = document.createElement("span");
+    endpoints.className = "history-endpoints";
+    endpoints.append(historyEndpoint(
+      "待测",
+      job.config.candidate_base_url,
+      job.config.candidate_api_key_hint,
+    ));
+    if (job.config.trusted_base_url) {
+      endpoints.append(historyEndpoint(
+        "参照",
+        job.config.trusted_base_url,
+        job.config.trusted_api_key_hint,
+      ));
+    }
+    main.append(title, endpoints);
+
+    const result = document.createElement("span");
+    result.className = "history-result";
     const verdict = document.createElement("span");
     verdict.className = `history-verdict ${historyTone(job)}`;
     verdict.textContent = job.summary?.combined_summary?.title_cn || formatStatus(job.status);
@@ -295,10 +317,27 @@ function renderHistory(jobs) {
     time.textContent = new Intl.DateTimeFormat("zh-CN", {
       month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
     }).format(new Date(job.created_at));
+    result.append(verdict, time);
 
-    button.append(model, mode, verdict, time);
+    button.append(main, result);
     list.append(button);
   });
+}
+
+function historyEndpoint(labelText, urlText, keyHint) {
+  const endpoint = document.createElement("span");
+  endpoint.className = "history-endpoint";
+  const label = document.createElement("span");
+  label.className = "history-endpoint-label";
+  label.textContent = labelText;
+  const url = document.createElement("span");
+  url.className = "history-url";
+  url.textContent = urlText || "—";
+  const key = document.createElement("code");
+  key.className = "history-key";
+  key.textContent = `Key ${keyHint || "—"}`;
+  endpoint.append(label, url, key);
+  return endpoint;
 }
 
 async function refreshHistory() {

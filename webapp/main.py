@@ -83,6 +83,19 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def mask_api_key(value: str) -> str:
+    if len(value) > 12:
+        return f"{value[:6]}...{value[-6:]}"
+    if len(value) <= 3:
+        return "..."
+    visible = min(3, max(1, (len(value) - 3) // 2))
+    return f"{value[:visible]}...{value[-visible:]}"
+
+
+def metadata_path_for(report_path: Path) -> Path:
+    return report_path.with_name(f"{report_path.stem}.meta.json")
+
+
 def validate_public_https_url(value: str) -> str:
     normalized = value.strip().rstrip("/")
     parsed = parse.urlsplit(normalized)
@@ -197,6 +210,8 @@ class JobManager:
     def _load_reports(self) -> None:
         loaded_per_owner: dict[str, int] = {}
         for report_path in sorted(REPORT_DIR.glob("*.json"), reverse=True):
+            if report_path.name.endswith(".meta.json"):
+                continue
             owner_path = report_path.with_suffix(".owner")
             try:
                 owner_id = owner_path.read_text(encoding="utf-8").strip()
@@ -207,6 +222,15 @@ class JobManager:
                 report = json.loads(report_path.read_text(encoding="utf-8"))
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
+            metadata: dict[str, Any] = {}
+            try:
+                loaded_metadata = json.loads(
+                    metadata_path_for(report_path).read_text(encoding="utf-8")
+                )
+                if isinstance(loaded_metadata, dict):
+                    metadata = loaded_metadata
+            except (OSError, json.JSONDecodeError):
+                pass
             config = report.get("configuration", {})
             job_id = report_path.stem
             created_at = datetime.fromtimestamp(
@@ -224,8 +248,12 @@ class JobManager:
                     "mode": config.get("detection_mode", "unknown"),
                     "candidate_base_url": config.get("candidate_base_url"),
                     "candidate_model": config.get("candidate_model"),
+                    "candidate_api_key_hint": metadata.get(
+                        "candidate_api_key_hint"
+                    ),
                     "trusted_base_url": config.get("trusted_base_url"),
                     "trusted_model": config.get("trusted_model"),
+                    "trusted_api_key_hint": metadata.get("trusted_api_key_hint"),
                     "workers": config.get("single_request_workers"),
                 },
                 report_json=report_path,
@@ -261,8 +289,16 @@ class JobManager:
                 "mode": payload.mode,
                 "candidate_base_url": candidate_url,
                 "candidate_model": payload.candidate.model.strip(),
+                "candidate_api_key_hint": mask_api_key(
+                    payload.candidate.api_key.get_secret_value()
+                ),
                 "trusted_base_url": trusted_url,
                 "trusted_model": payload.trusted.model.strip() if payload.trusted else None,
+                "trusted_api_key_hint": (
+                    mask_api_key(payload.trusted.api_key.get_secret_value())
+                    if payload.trusted
+                    else None
+                ),
                 "workers": payload.workers,
                 "trials": payload.trials,
                 "juice_repeats": payload.juice_repeats,
@@ -321,6 +357,7 @@ class JobManager:
     async def _run(self, job: Job, secrets: dict[str, str]) -> None:
         output_path = REPORT_DIR / f"{job.id}.json"
         owner_path = output_path.with_suffix(".owner")
+        metadata_path = metadata_path_for(output_path)
         env = os.environ.copy()
         env["CANDIDATE_API_KEY"] = secrets["candidate"]
         if secrets["trusted"]:
@@ -329,6 +366,21 @@ class JobManager:
         try:
             owner_path.write_text(job.owner_id, encoding="utf-8")
             owner_path.chmod(0o600)
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "candidate_api_key_hint": job.config.get(
+                            "candidate_api_key_hint"
+                        ),
+                        "trusted_api_key_hint": job.config.get(
+                            "trusted_api_key_hint"
+                        ),
+                    },
+                    ensure_ascii=True,
+                ),
+                encoding="utf-8",
+            )
+            metadata_path.chmod(0o600)
             job.status = "running"
             job.started_at = utc_now()
             process = subprocess.Popen(
@@ -379,10 +431,11 @@ class JobManager:
             job.process = None
             job.finished_at = utc_now()
             if not job.report_json:
-                try:
-                    owner_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                for sidecar_path in (owner_path, metadata_path):
+                    try:
+                        sidecar_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
             async with self.lock:
                 if self.active_ids.get(job.owner_id) == job.id:
                     self.active_ids.pop(job.owner_id, None)

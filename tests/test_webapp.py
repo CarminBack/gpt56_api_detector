@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from pathlib import Path
 import sys
@@ -21,6 +22,7 @@ from webapp.main import (
     app,
     browser_id_from_token,
     manager,
+    mask_api_key,
     validate_public_https_url,
 )
 
@@ -80,6 +82,14 @@ def test_browser_histories_and_job_access_are_isolated() -> None:
             assert [job["id"] for job in jobs_b["jobs"]] == [job_b.id]
             assert "owner_id" not in jobs_a["jobs"][0]
             assert "owner_id" not in jobs_b["jobs"][0]
+            assert (
+                jobs_a["jobs"][0]["config"]["candidate_base_url"]
+                == "https://api.example.com/v1"
+            )
+            assert (
+                jobs_a["jobs"][0]["config"]["candidate_api_key_hint"]
+                == "sk-exa...secret"
+            )
             assert jobs_a["active_id"] == job_a.id
             assert jobs_b["active_id"] == job_b.id
 
@@ -118,6 +128,8 @@ def test_different_browsers_can_start_jobs_concurrently(monkeypatch) -> None:
         first = await job_manager.start(payload, "a" * 32)
         second = await job_manager.start(payload, "b" * 32)
         assert first.id != second.id
+        assert first.config["candidate_api_key_hint"] == mask_api_key("sk-test")
+        assert "sk-test" not in json.dumps(first.public())
         assert job_manager.active_ids["a" * 32] == first.id
         assert job_manager.active_ids["b" * 32] == second.id
         with pytest.raises(HTTPException) as exc_info:
@@ -133,6 +145,19 @@ def test_dashboard_has_visible_model_selectors() -> None:
     assert 'id="candidate-model-select"' in dashboard.text
     assert 'id="trusted-model-select"' in dashboard.text
     assert "<datalist" not in dashboard.text
+
+
+def test_api_key_masking_never_returns_the_complete_key() -> None:
+    api_key = "test-api-key-1234567890abcdef"
+    assert mask_api_key(api_key) == f"{api_key[:6]}...{api_key[-6:]}"
+    for short_key in ("a", "sk-test", "123456789012"):
+        assert mask_api_key(short_key) != short_key
+
+
+def test_start_job_keeps_api_key_inputs() -> None:
+    script = (main_module.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert 'el("candidate-key").value = ""' not in script
+    assert 'el("trusted-key").value = ""' not in script
 
 
 def test_private_or_non_https_targets_are_rejected() -> None:
@@ -161,8 +186,10 @@ def test_detector_command_contains_no_api_keys(tmp_path) -> None:
             "mode": "juice",
             "candidate_base_url": "https://api.example.com/v1",
             "candidate_model": "gpt-5.6-sol",
+            "candidate_api_key_hint": "sk-tes...secret",
             "trusted_base_url": None,
             "trusted_model": None,
+            "trusted_api_key_hint": None,
             "workers": 4,
             "trials": 20,
             "juice_repeats": 3,
@@ -184,8 +211,10 @@ def test_job_process_completes_when_report_exists(monkeypatch) -> None:
             "mode": "juice",
             "candidate_base_url": "https://api.example.com/v1",
             "candidate_model": "gpt-5.6-sol",
+            "candidate_api_key_hint": "sk-tes...secret",
             "trusted_base_url": None,
             "trusted_model": None,
+            "trusted_api_key_hint": None,
             "workers": 1,
             "trials": 4,
             "juice_repeats": 1,
@@ -205,18 +234,31 @@ def test_job_process_completes_when_report_exists(monkeypatch) -> None:
         return [sys.executable, "-c", code]
 
     monkeypatch.setattr(manager, "_command", fake_command)
-    asyncio.run(manager._run(job, {"candidate": "sk-test", "trusted": ""}))
+    complete_key = "sk-test-complete-secret"
+    asyncio.run(manager._run(job, {"candidate": complete_key, "trusted": ""}))
 
     assert job.status == "completed"
     assert job.report_json and job.report_json.exists()
     assert "fake detector complete" in job.logs
     owner_path = job.report_json.with_suffix(".owner")
+    metadata_path = job.report_json.with_name(f"{job.id}.meta.json")
     assert owner_path.read_text(encoding="utf-8") == job.owner_id
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata == {
+        "candidate_api_key_hint": "sk-tes...secret",
+        "trusted_api_key_hint": None,
+    }
+    assert complete_key not in metadata_path.read_text(encoding="utf-8")
     reloaded = JobManager()
     assert reloaded.jobs[job.id].owner_id == job.owner_id
+    assert (
+        reloaded.jobs[job.id].config["candidate_api_key_hint"]
+        == "sk-tes...secret"
+    )
     job.report_json.unlink(missing_ok=True)
     job.report_html.unlink(missing_ok=True)
     owner_path.unlink(missing_ok=True)
+    metadata_path.unlink(missing_ok=True)
 
 
 def make_job(job_id: str, owner_id: str, status: str = "completed") -> Job:
@@ -229,8 +271,10 @@ def make_job(job_id: str, owner_id: str, status: str = "completed") -> Job:
             "mode": "juice",
             "candidate_base_url": "https://api.example.com/v1",
             "candidate_model": "gpt-5.6-sol",
+            "candidate_api_key_hint": "sk-exa...secret",
             "trusted_base_url": None,
             "trusted_model": None,
+            "trusted_api_key_hint": None,
             "workers": 1,
             "trials": 4,
             "juice_repeats": 1,

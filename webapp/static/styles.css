@@ -659,12 +659,12 @@ select:disabled {
 
 .history-item {
   width: 100%;
-  min-height: 62px;
-  padding: 10px 4px;
+  min-height: 84px;
+  padding: 12px 4px;
   display: grid;
-  grid-template-columns: minmax(160px, 1.2fr) minmax(120px, 0.8fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
+  gap: 16px;
   color: var(--ink);
   text-align: left;
   border: 0;
@@ -676,20 +676,72 @@ select:disabled {
   background: var(--surface-muted);
 }
 
-.history-item strong,
 .history-item span {
   min-width: 0;
-  overflow-wrap: anywhere;
 }
 
 .history-item strong {
   font-size: 13px;
 }
 
+.history-main,
+.history-title-row,
+.history-endpoints,
+.history-result {
+  display: flex;
+}
+
+.history-main,
+.history-endpoints,
+.history-result {
+  flex-direction: column;
+}
+
+.history-main {
+  gap: 7px;
+}
+
+.history-title-row {
+  align-items: center;
+  gap: 8px;
+}
+
+.history-endpoints {
+  gap: 4px;
+}
+
+.history-endpoint {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.history-endpoint-label,
 .history-item .history-mode,
 .history-item time {
   color: var(--muted);
   font-size: 12px;
+}
+
+.history-endpoint-label {
+  font-weight: 600;
+}
+
+.history-url {
+  overflow-wrap: anywhere;
+}
+
+.history-key {
+  color: #3f4946;
+  white-space: nowrap;
+  font: 11px/1.5 "SFMono-Regular", Consolas, monospace;
+}
+
+.history-result {
+  align-items: flex-end;
+  gap: 7px;
 }
 
 .history-verdict {
@@ -762,14 +814,6 @@ select:disabled {
     border-bottom: 1px solid var(--line);
   }
 
-  .history-item {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .history-mode,
-  .history-item time {
-    display: none;
-  }
 }
 
 @media (max-width: 720px) {
@@ -864,6 +908,20 @@ select:disabled {
   .history-item {
     grid-template-columns: minmax(0, 1fr);
     gap: 5px;
+  }
+
+  .history-endpoint {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .history-key {
+    grid-column: 2;
+  }
+
+  .history-result {
+    align-items: flex-start;
+    flex-direction: row;
+    justify-content: space-between;
   }
 }
 
