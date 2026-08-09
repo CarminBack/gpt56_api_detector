@@ -1,6 +1,6 @@
 # GPT-5.6 vNext 混用检测器技术报告
 
-版本：`4.0.0`
+版本：`4.0.1`
 实现根目录：`gpt56_vnext/`
 评分版本：`trusted-likelihood-v2`
 
@@ -321,12 +321,15 @@ Juice 通过要求：
 固定输出探针分别要求精确返回字符串 `48` 和 `32`。分类规则极简：
 
 ```text
-strip(answer) == expected  -> pass
-请求成功但不精确相等      -> hard anomaly
-网络/协议失败              -> network quality only
+answer == expected             -> pass
+answer 匹配纯数字 ^40[0-9]*$   -> hard anomaly
+其他非精确输出                 -> invalid evidence
+网络/协议失败                  -> network quality only
 ```
 
-持续模式在两个值之间交替，避免每轮只测同一个型号特征。该层不推断模型是谁，只检查响应是否被中转替换。
+持续模式在两个值之间交替，避免每轮只测同一个型号特征。该层不把任意格式漂移升级为改写，只检测将控制值定向替换为 `40` 或 `40...` 的行为。
+
+Responses SSE 的正文以完整事件流为准：优先使用 `response.completed` 中的终态正文；终态正文为空时回退到按顺序拼接的 `response.output_text.delta`。两者同时存在但不一致时按协议异常处理，避免代理终态快照漏写 `output` 时产生假空回。
 
 ## 9. 确定性层三：简单 Juice 覆盖
 
@@ -629,7 +632,7 @@ Juice通过但概率探针证据不足
 判定优先级：
 
 1. Juice 在所有启用档位有足够有效样本但全部无法识别：`可能非GPT`。
-2. Juice 命中其他型号，或 32/48、覆盖探针出现 hard anomaly：`Juice混用`。
+2. Juice 命中其他型号，或 32/48 被改成 `40/40...`、覆盖探针出现 hard anomaly：`Juice混用`。
 3. Juice 通过，正式概率层达到纯替换或混合报警门槛：`仅概率探针混用`。
 4. Juice 通过，但启用的正式概率层缺样本、OOD、契约不符或未过门禁：`Juice通过但概率探针证据不足`。
 5. Juice 通过，且未启用概率层，或正式概率层完整并支持申报型号：`通过`。

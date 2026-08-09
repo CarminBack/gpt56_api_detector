@@ -97,6 +97,8 @@ class _SSECollector:
     def __init__(self) -> None:
         self.data_lines: list[str] = []
         self.terminal: dict[str, Any] | None = None
+        self.terminal_type: str | None = None
+        self.output_text_deltas: list[str] = []
         self.events = 0
 
     def _consume(self) -> None:
@@ -110,8 +112,12 @@ class _SSECollector:
         if not isinstance(event, dict):
             raise ValueError("SSE event is not an object")
         self.events += 1
-        if event.get("type") in TERMINAL_EVENTS and isinstance(event.get("response"), dict):
+        event_type = event.get("type")
+        if event_type == "response.output_text.delta" and isinstance(event.get("delta"), str):
+            self.output_text_deltas.append(event["delta"])
+        if event_type in TERMINAL_EVENTS and isinstance(event.get("response"), dict):
             self.terminal = event["response"]
+            self.terminal_type = event_type
 
     def feed(self, raw_line: bytes) -> bool:
         line = raw_line.decode("utf-8").rstrip("\r\n")
@@ -125,7 +131,16 @@ class _SSECollector:
         self._consume()
         if self.terminal is None:
             raise ValueError("SSE ended without a terminal response")
-        return self.terminal, self.events
+        terminal = self.terminal
+        if self.terminal_type == "response.completed":
+            terminal_text = output_text(terminal)
+            streamed_text = "".join(self.output_text_deltas).strip()
+            if terminal_text and streamed_text and terminal_text != streamed_text:
+                raise ValueError("SSE terminal output conflicts with streamed text")
+            if not terminal_text and streamed_text:
+                terminal = dict(terminal)
+                terminal["output_text"] = streamed_text
+        return terminal, self.events
 
 
 def parse_sse(raw: bytes) -> tuple[dict[str, Any], int]:

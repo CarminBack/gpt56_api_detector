@@ -118,13 +118,22 @@ def classify_juice_answer(effort: str, answer: str, claimed_model: str = "gpt-5.
 
 
 def classify_output_integrity(expected: str, answer: str) -> dict[str, Any]:
-    exact = str(answer) == str(expected)
+    observed = str(answer)
+    exact = observed == str(expected)
+    rewritten_to_40 = re.fullmatch(r"40[0-9]*", observed) is not None
+    if exact:
+        classification = "current_success"
+    elif rewritten_to_40:
+        classification = "output_rewrite_40_prefix"
+    else:
+        classification = "unsuccessful"
     return {
         "expected": str(expected),
-        "observed": str(answer),
-        "classification": "current_success" if exact else "deterministic_anomaly",
+        "observed": observed,
+        "classification": classification,
         "exact": exact,
-        "hard_anomaly": not exact,
+        "hard_anomaly": rewritten_to_40,
+        "unsuccessful_reason": "non_exact_non_40_output" if classification == "unsuccessful" else None,
     }
 
 

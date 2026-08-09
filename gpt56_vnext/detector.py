@@ -703,8 +703,10 @@ class DetectorSession:
         output_summary = {
             "requests": len(output_rows),
             "exact": sum(row.get("exact") is True for row in output_rows),
+            "invalid": sum(row.get("classification") == "unsuccessful" for row in output_rows),
             "hard_anomaly": any(row.get("hard_anomaly") for row in output_rows),
             "failures": [row for row in output_rows if row.get("hard_anomaly")],
+            "invalid_rows": [row for row in output_rows if row.get("classification") == "unsuccessful"],
         }
         coverage_rows = [row for row in completed_rows if row.get("probe_id") == "juice_coverage" and row.get("status") == "ok"]
         coverage_summary = {

@@ -82,7 +82,7 @@ def build_overall_verdict(
     for event in juice_summary.get("sticky_events", []):
         failed_items.append({"layer": "juice", "reason": event.get("reason"), "evidence": event.get("evidence")})
     for row in output.get("failures", []):
-        failed_items.append({"layer": "output_integrity", "reason": "non_exact_literal", "evidence": row})
+        failed_items.append({"layer": "output_integrity", "reason": row.get("classification"), "evidence": row})
     for row in coverage.get("failures", []):
         failed_items.append({"layer": "juice_coverage", "reason": row.get("classification"), "evidence": row})
     if probability_alert:
@@ -109,7 +109,7 @@ def build_overall_verdict(
     if juice_mixed:
         common_causes.append("同一端点返回了其他 GPT-5.6 或旧 GPT 型号的确定性 Juice 指纹")
     if output.get("hard_anomaly"):
-        common_causes.append("输出端改写了要求精确返回的 32/48 控制值")
+        common_causes.append("输出端把 32/48 控制值改写成了 40 或 40 开头的纯数字")
     if coverage.get("hard_anomaly"):
         common_causes.append("隐藏 system/developer 规则可能覆盖了显式 Juice 定义")
     if probability.get("pure_model_alert"):

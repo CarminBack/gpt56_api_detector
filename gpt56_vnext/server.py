@@ -293,7 +293,7 @@ class Handler(BaseHTTPRequestHandler):
                 "pending_custom_probe": self.server.state.pending_custom_probe,
                 "probe_catalog": [
                     {"id": "juice_high", "name": "Juice high", "type": "Juice", "description": "逐条先匹配申报型号，再匹配其他已知型号；共享值优先算申报型号成功。"},
-                    {"id": "output_integrity", "name": "32/48 输出完整性", "type": "防改写", "description": "成功响应不是精确目标值时产生确定性异常。"},
+                    {"id": "output_integrity", "name": "32/48 输出完整性", "type": "防改写", "description": "精确返回 32/48 为通过；只有被改成 40 或 40 开头纯数字时才硬报警，其他输出只记无效证据。"},
                     {"id": "juice_coverage", "name": "显式 N 覆盖", "type": "防覆盖", "description": "仅针对把 Sol high 伪装成 40/40xxx 的 Juice 隐藏覆盖：显式定义 N 后检查是否仍被改回已知指纹。"},
                 ] + _probability_probe_catalog(),
             })
