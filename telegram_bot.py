@@ -343,7 +343,15 @@ def build_application(config: BotConfig) -> Any:
         from telegram.ext import Application, CommandHandler, MessageHandler, filters
     except ImportError as exc:
         raise RuntimeError("请先安装 requirements-telegram.txt") from exc
-    application = Application.builder().token(config.telegram_token).build()
+    application = (
+        Application.builder()
+        .token(config.telegram_token)
+        .get_updates_connect_timeout(15)
+        .get_updates_read_timeout(30)
+        .get_updates_write_timeout(15)
+        .get_updates_pool_timeout(15)
+        .build()
+    )
     application.bot_data["config"] = config
     application.bot_data["semaphore"] = asyncio.Semaphore(config.max_concurrent_checks)
     application.add_handler(CommandHandler("start", handle_start))
