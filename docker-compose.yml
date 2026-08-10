@@ -17,5 +17,19 @@ services:
       retries: 3
       start_period: 10s
 
+  telegram-bot:
+    profiles: ["telegram"]
+    image: ${DETECTOR_IMAGE:-ghcr.io/carminback/gpt56_api_detector:latest}
+    container_name: gpt56-api-detector-telegram
+    restart: unless-stopped
+    command: ["python", "telegram_bot.py"]
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS:-}
+      DETECTOR_API_URL: ${DETECTOR_API_URL:-https://check.mewinyou.shop}
+      BOT_MAX_CONCURRENT_CHECKS: ${BOT_MAX_CONCURRENT_CHECKS:-2}
+      BOT_POLL_INTERVAL_SECONDS: ${BOT_POLL_INTERVAL_SECONDS:-3}
+      BOT_JOB_TIMEOUT_SECONDS: ${BOT_JOB_TIMEOUT_SECONDS:-1800}
+
 volumes:
   detector-data:

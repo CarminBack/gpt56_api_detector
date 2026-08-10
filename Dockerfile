@@ -6,8 +6,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements-web.txt ./
-RUN pip install --no-cache-dir -r requirements-web.txt
+COPY requirements-web.txt requirements-telegram.txt ./
+RUN pip install --no-cache-dir -r requirements-web.txt -r requirements-telegram.txt
 
 COPY . .
 RUN mkdir -p /data/reports && chown -R nobody:nogroup /data

@@ -390,3 +390,20 @@ pip install -r requirements-dev.txt
 APP_BROWSER_SECRET=test-browser-secret-with-at-least-32-characters uvicorn webapp.main:app --reload
 pytest
 ```
+
+## Telegram 机器人
+
+同一个 Docker 镜像还包含 Telegram 适配器。将 BotFather 给出的 token 写入 `.env` 的 `TELEGRAM_BOT_TOKEN`，然后启动：
+
+```bash
+cp .env.example .env
+docker compose --profile telegram up -d telegram-bot
+```
+
+默认不限制聊天。要只允许自己的群组，先在目标群发送 `/chatid`，把返回的数字写入 `.env`：
+
+```env
+TELEGRAM_ALLOWED_CHAT_IDS=-1001234567890
+```
+
+重启 `telegram-bot` 后，其他群组和私聊会被静默忽略；可用逗号分隔多个群组 ID。在群里直接发送 `@你的机器人 https://接口地址/v1 API密钥`。机器人会通过 `DETECTOR_API_URL`（默认 `https://check.mewinyou.shop`）依次运行 `gpt-5.6-sol` 和 `gpt-5.6-terra` 的 Juice-only 检测，完成后以 Telegram mention 回复每个结果。API 密钥只在请求检测服务时使用，不会出现在 Telegram 回复、日志或命令行参数中。检测服务和机器人都需要能访问公网；请勿把 Bot token 提交到 Git。
