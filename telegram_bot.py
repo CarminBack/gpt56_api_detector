@@ -289,13 +289,17 @@ async def handle_message(update: Any, context: Any) -> None:
     bot_username = str(getattr(getattr(context, "bot", None), "username", "") or "")
     chat_type = getattr(chat, "type", None)
     config: BotConfig = context.application.bot_data["config"]
+    chat_id = getattr(chat, "id", None)
     if (
         not message
         or not user
-        or not chat_is_allowed(getattr(chat, "id", None), config.allowed_chat_ids)
+        or not chat_is_allowed(chat_id, config.allowed_chat_ids)
         or not message_targets_bot(text, chat_type, bot_username)
     ):
+        if message and chat_id is not None and not chat_is_allowed(chat_id, config.allowed_chat_ids):
+            LOGGER.info("ignored unauthorized chat_id=%s", chat_id)
         return
+    LOGGER.info("check request received: chat_id=%s user_id=%s", chat_id, user.id)
     try:
         check_request = parse_check_request(text, bot_username)
     except RequestParseError as exc:
