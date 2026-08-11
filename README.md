@@ -1,6 +1,8 @@
 # GPT-5.6 混用检测器 4.1.0
 
-这是一个在本机运行的 GPT-5.6 API 混用检测器。它面向使用 OpenAI-compatible 中转 API 的普通用户，主要检查一个申报为 Sol、Terra 或 Luna 的接口，是否在不同请求中混入其他型号、旧型号，或改写检测输出。友情链接：https://linux.do/t/topic/2704354
+这是一个在本机运行的 GPT-5.6 API 混用检测器。它面向使用 OpenAI-compatible 中转 API 的普通用户，主要检查一个申报为 Sol、Terra 或 Luna 的接口，是否在不同请求中混入其他型号、旧型号，或改写检测输出。
+友情链接：https://linux.do/t/topic/2704354
+概率探针参考了：https://github.com/hanlinwenyuan/hlwy-ai-checker
 
 
 8.10更新
