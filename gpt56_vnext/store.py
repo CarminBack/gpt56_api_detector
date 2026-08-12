@@ -11,7 +11,7 @@ from typing import Any, Callable, TypeVar
 from .utils import canonical_json, utc_now
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 T = TypeVar("T")
 
 
@@ -60,6 +60,7 @@ class SQLiteStateStore:
                 kind TEXT NOT NULL,
                 status TEXT NOT NULL,
                 claimed_model TEXT,
+                request_model TEXT,
                 safe_endpoint TEXT,
                 config_json TEXT NOT NULL,
                 config_hash TEXT NOT NULL,
@@ -135,6 +136,9 @@ class SQLiteStateStore:
             CREATE INDEX IF NOT EXISTS idx_results_session ON results(session_id, result_id);
             """
         )
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(sessions)")}
+        if "request_model" not in columns:
+            connection.execute("ALTER TABLE sessions ADD COLUMN request_model TEXT")
         connection.execute(
             "INSERT INTO metadata(key,value) VALUES('schema_version',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -200,6 +204,7 @@ class SQLiteStateStore:
         config_hash: str,
         official: bool,
         claimed_model: str | None = None,
+        request_model: str | None = None,
         safe_endpoint: str | None = None,
     ) -> None:
         now = utc_now()
@@ -215,9 +220,9 @@ class SQLiteStateStore:
                     raise ValueError("existing session configuration does not match")
                 return
             connection.execute(
-                "INSERT INTO sessions(session_id,kind,status,claimed_model,safe_endpoint,config_json,config_hash,official,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (session_id, kind, status, claimed_model, safe_endpoint, config_json, config_hash, int(official), now, now),
+                "INSERT INTO sessions(session_id,kind,status,claimed_model,request_model,safe_endpoint,config_json,config_hash,official,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (session_id, kind, status, claimed_model, request_model or claimed_model, safe_endpoint, config_json, config_hash, int(official), now, now),
             )
             connection.commit()
 
@@ -229,6 +234,7 @@ class SQLiteStateStore:
             if row is None:
                 return None
             value = dict(row)
+            value["request_model"] = value.get("request_model") or value.get("claimed_model")
             value["config"] = json.loads(value.pop("config_json"))
             value["official"] = bool(value["official"])
             return value

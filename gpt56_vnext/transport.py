@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+import fnmatch
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -12,6 +14,7 @@ import threading
 import time
 from typing import Any, Callable, Iterable
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from .utils import normalize_api_base_url, utc_now
@@ -34,6 +37,194 @@ DEFAULT_SAFE_MESSAGES = {
     "response_failed": "上游明确返回响应失败",
     "user_cancelled": "用户已停止当前任务，请求已取消",
 }
+
+
+def native_profile_user_agent(path: str | Path = RAW_PROFILE) -> str:
+    with Path(path).open("rb") as handle:
+        header_block = handle.read(131072).split(b"\r\n\r\n", 1)[0]
+    for raw_line in header_block.splitlines():
+        name, separator, value = raw_line.partition(b":")
+        if separator and name.strip().lower() == b"user-agent":
+            user_agent = value.decode("utf-8", errors="strict").strip()
+            if user_agent:
+                return user_agent
+    raise RuntimeError("原生请求模板缺少User-Agent")
+
+
+DEFAULT_UPSTREAM_USER_AGENT = native_profile_user_agent()
+
+
+@dataclass(frozen=True)
+class ProxyDecision:
+    mode: str
+    proxy_url: str | None
+    source: str
+
+
+def _environment_value(environment: dict[str, str], name: str) -> str:
+    for key in (name, name.casefold()):
+        value = str(environment.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _proxy_host_matches(host: str, port: int | None, raw_rules: str, *, windows: bool = False) -> bool:
+    host = host.casefold().strip("[]")
+    for raw_rule in re.split(r"[;,]" if windows else r",", raw_rules or ""):
+        rule = raw_rule.strip().casefold()
+        if not rule:
+            continue
+        if windows and rule == "<local>" and "." not in host:
+            return True
+        if rule == "*":
+            return True
+        if ":" in rule and not rule.startswith("["):
+            candidate, separator, candidate_port = rule.rpartition(":")
+            if separator and candidate_port.isdigit():
+                if port != int(candidate_port):
+                    continue
+                rule = candidate
+        rule = rule.lstrip(".")
+        if "*" in rule:
+            if fnmatch.fnmatch(host, rule):
+                return True
+        elif host == rule or host.endswith("." + rule):
+            return True
+    return False
+
+
+def _normalize_http_proxy(value: str) -> str:
+    raw = value.strip()
+    if not raw:
+        raise ValueError("代理地址为空")
+    if "://" not in raw:
+        raw = "http://" + raw
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme.casefold() != "http":
+        raise ValueError("原生Codex仅支持HTTP/mixed代理端口；请改用HTTP代理端口或系统级TUN")
+    if not parsed.hostname or parsed.port is None:
+        raise ValueError("HTTP代理地址必须包含主机和端口")
+    return urllib.parse.urlunsplit(("http", parsed.netloc, "", "", ""))
+
+
+def _parse_windows_proxy_server(server: str) -> str:
+    entries: dict[str, str] = {}
+    fallback = ""
+    for item in str(server or "").split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        if "=" in item:
+            protocol, value = item.split("=", 1)
+            entries[protocol.strip().casefold()] = value.strip()
+        elif not fallback:
+            fallback = item
+    return entries.get("https") or fallback or entries.get("http") or ""
+
+
+def read_windows_manual_proxy() -> dict[str, Any]:
+    if os.name != "nt":
+        return {"enabled": False, "server": "", "bypass": "", "auto_config_url": ""}
+    try:
+        import winreg
+
+        path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as key:
+            def read(name: str, default: Any) -> Any:
+                try:
+                    return winreg.QueryValueEx(key, name)[0]
+                except OSError:
+                    return default
+
+            return {
+                "enabled": bool(read("ProxyEnable", 0)),
+                "server": str(read("ProxyServer", "") or ""),
+                "bypass": str(read("ProxyOverride", "") or ""),
+                "auto_config_url": str(read("AutoConfigURL", "") or ""),
+            }
+    except OSError:
+        return {"enabled": False, "server": "", "bypass": "", "auto_config_url": ""}
+
+
+def resolve_native_proxy(
+    target_url: str,
+    environment: dict[str, str] | None = None,
+    windows_proxy_reader: Callable[[], dict[str, Any]] = read_windows_manual_proxy,
+) -> ProxyDecision:
+    environment = dict(os.environ if environment is None else environment)
+    target = urllib.parse.urlsplit(target_url)
+    host = target.hostname or ""
+    port = target.port or (443 if target.scheme.casefold() == "https" else 80)
+    no_proxy = _environment_value(environment, "NO_PROXY")
+    if no_proxy and _proxy_host_matches(host, port, no_proxy):
+        return ProxyDecision("direct", None, "bypass")
+    for name, source in (
+        ("HTTPS_PROXY", "environment_https"),
+        ("ALL_PROXY", "environment_all"),
+        ("HTTP_PROXY", "environment_http"),
+    ):
+        value = _environment_value(environment, name)
+        if value:
+            return ProxyDecision("proxy", _normalize_http_proxy(value), source)
+    settings = windows_proxy_reader() or {}
+    if bool(settings.get("enabled")):
+        bypass = str(settings.get("bypass") or "")
+        if bypass and _proxy_host_matches(host, port, bypass, windows=True):
+            return ProxyDecision("direct", None, "bypass")
+        value = _parse_windows_proxy_server(str(settings.get("server") or ""))
+        if value:
+            return ProxyDecision("proxy", _normalize_http_proxy(value), "windows_manual")
+    if str(settings.get("auto_config_url") or "").strip():
+        raise ValueError("原生Codex不解析PAC脚本；请改用HTTP/mixed代理端口或系统级TUN")
+    return ProxyDecision("direct", None, "none")
+
+
+def _native_child_environment(target_url: str) -> tuple[dict[str, str], ProxyDecision]:
+    decision = resolve_native_proxy(target_url)
+    proxy_names = {"https_proxy", "all_proxy", "http_proxy", "no_proxy"}
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.casefold() not in proxy_names
+    }
+    if decision.mode == "proxy" and decision.proxy_url:
+        environment["HTTPS_PROXY"] = decision.proxy_url
+    return environment, decision
+
+
+def _structured_native_error(stderr: str) -> dict[str, Any] | None:
+    for line in reversed((stderr or "").splitlines()):
+        if not line.strip().startswith("error:"):
+            continue
+        try:
+            value = json.loads(line.split("error:", 1)[1].strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _native_error_details(stderr: str) -> tuple[str, str, bool]:
+    value = _structured_native_error(stderr) or {}
+    parts = [str(value.get(key) or "") for key in ("code", "name", "message", "cause")]
+    nested = value.get("nested") or []
+    parts.extend(str(item) for item in nested if isinstance(item, (str, int)))
+    text = " ".join(parts).casefold()
+    if "econnrefused" in text:
+        return "connection_or_transport_error", "代理端口或目标拒绝连接", True
+    if "enotfound" in text or "eai_again" in text:
+        return "connection_or_transport_error", "代理或目标DNS解析失败", True
+    if "proxy connect timeout" in text:
+        return "timeout", "连接HTTP代理隧道超时", True
+    if "proxy connect failed" in text:
+        return "connection_or_transport_error", "HTTP代理隧道建立失败", True
+    if any(token in text for token in ("certificate", "cert_", "tls", "ssl")):
+        return "connection_or_transport_error", "代理或目标TLS握手失败", True
+    if "native response timeout" in text or "timeout" in text:
+        return "timeout", "已建立连接，但等待原生Codex响应超时", True
+    return "connection_or_transport_error", "原生Codex网络连接或传输失败", True
 
 
 class TransportError(RuntimeError):
@@ -354,7 +545,7 @@ class StreamingTransport:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
-            "User-Agent": os.environ.get("GPT56_USER_AGENT", "python-urllib/3"),
+            "User-Agent": str(os.environ.get("GPT56_USER_AGENT") or "").strip() or DEFAULT_UPSTREAM_USER_AGENT,
         })
         started_wall = utc_now()
         started = time.perf_counter()
@@ -494,7 +685,15 @@ class StreamingTransport:
         ]
         if context_mode == "fixed_32k_history":
             command.extend(["--history-file", str(HISTORY_FIXTURE)])
-        environment = dict(os.environ)
+        try:
+            environment, proxy_decision = _native_child_environment(url)
+        except ValueError as exc:
+            raise TransportError(
+                "unsupported native proxy configuration",
+                category="connection_or_transport_error",
+                retryable=False,
+                safe_message=str(exc),
+            ) from exc
         environment["GPT56_NATIVE_AUTHORIZATION"] = self.api_key
         started_wall = utc_now()
         started = time.perf_counter()
@@ -519,7 +718,7 @@ class StreamingTransport:
                 self._terminate_process(process)
                 raise TransportCancelled()
             try:
-                stdout, _stderr = process.communicate(
+                stdout, stderr = process.communicate(
                     input=json.dumps(messages, ensure_ascii=False, separators=(",", ":")),
                     timeout=self.timeout + 10,
                 )
@@ -539,7 +738,14 @@ class StreamingTransport:
         if self.cancellation.is_cancelled():
             raise TransportCancelled()
         if process is None or process.returncode != 0:
-            raise TransportError("native transport failed", elapsed_ms=elapsed)
+            category, safe_message, retryable = _native_error_details(stderr if process is not None else "")
+            raise TransportError(
+                "native transport failed",
+                elapsed_ms=elapsed,
+                category=category,
+                retryable=retryable,
+                safe_message=safe_message,
+            )
         report = json.loads(stdout)
         status = int(report["status"])
         stream_text = str(report.get("body", ""))
@@ -551,7 +757,12 @@ class StreamingTransport:
             request_text = base64.b64decode(encoded).decode("utf-8")
         if not 200 <= status < 300:
             exchange = self._exchange(session_id, job_id, started_wall, None, url, "native_codex", context_mode, model, effort, status, report.get("headers", {}), request_text, stream_text, None, None, 0, "native upstream HTTP error")
-            raise TransportError("native upstream HTTP error", status=status, elapsed_ms=elapsed, exchange=exchange)
+            safe_message = (
+                "已到达中转，但认证或客户端权限被拒绝；请检查API key、权限、User-Agent或客户端白名单"
+                if status in {401, 403}
+                else f"上游返回HTTP错误（HTTP {status}）"
+            )
+            raise TransportError("native upstream HTTP error", status=status, elapsed_ms=elapsed, exchange=exchange, safe_message=safe_message)
         try:
             parsed, events = parse_sse(stream_text.encode("utf-8"))
         except ResponseTerminalError as exc:
@@ -589,6 +800,9 @@ class StreamingTransport:
 
 
 __all__ = [
+    "DEFAULT_UPSTREAM_USER_AGENT",
+    "ProxyDecision",
+    "RAW_PROFILE",
     "RequestCancellationController",
     "ResponseTerminalError",
     "StreamingTransport",
@@ -596,6 +810,9 @@ __all__ = [
     "TransportError",
     "TransportResult",
     "build_payload",
+    "native_profile_user_agent",
     "output_text",
     "parse_sse",
+    "read_windows_manual_proxy",
+    "resolve_native_proxy",
 ]

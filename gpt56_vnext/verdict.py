@@ -25,7 +25,7 @@ MODEL_LABELS = {
 }
 
 FINGERPRINT_REASON_CN = {
-    "no_exact_runtime_contract": "当前题面、请求次数或请求格式没有对应的正式内置指纹基线。",
+    "no_exact_runtime_policy": "当前题面、请求次数或请求格式没有对应的4.1.1正式运行策略。",
     "runtime_reference_only": "当前配置只允许显示参考匹配度，不产生正式强指向结论。",
     "runtime_contract_mismatch": "探针题面、思考强度、归一化方式或请求格式与冻结契约不一致。",
     "baseline_cells_missing": "可信基线缺少当前配置所需的探针格。",
@@ -34,7 +34,7 @@ FINGERPRINT_REASON_CN = {
     "no_model_reached_strong_match_threshold": "三个模型都没有越过当前档位的强指向线。",
     "multiple_models_reached_threshold": "多个模型同时越过强指向线，结果存在数值异常。",
     "custom_probe_reference_only": "导入的自定义探针未经发行版正式验证，匹配度仅供参考。",
-    "builtin_fingerprint_not_enabled": "当前档位没有启用内置指纹探针。",
+    "no_probability_probe_selected": "当前配置没有启用概率指纹探针。",
 }
 
 
@@ -102,8 +102,6 @@ def _subtitle(juice_state: str, fingerprint: dict[str, Any], custom: bool) -> st
         text = "所有达到数量要求的有效 Juice 响应均未命中已知型号指纹；也可能由统一输出改写、参数未透传或探针拦截造成。"
     elif juice_state == "pass" and fingerprint.get("fingerprint_status") == "strong_match":
         text = f"Juice 未发现型号冲突；本批行为分布与 {fingerprint_model} 的可信指纹最接近。"
-    elif juice_state == "pass" and "builtin_fingerprint_not_enabled" in fingerprint_reasons:
-        text = "Juice 未发现型号冲突。当前为低档，仅检测 Juice 与确定性异常，未启用行为指纹探针。"
     elif juice_state == "pass":
         text = "Juice 未发现型号冲突，但行为指纹没有形成正式强指向；请结合样本完整性和线路质量阅读。"
     elif juice_state == "mismatch" and fingerprint.get("fingerprint_status") == "strong_match":
@@ -112,8 +110,6 @@ def _subtitle(juice_state: str, fingerprint: dict[str, Any], custom: bool) -> st
         text = "至少一项确定性检查与申报不一致；行为指纹暂时没有形成明确方向。"
     elif fingerprint.get("fingerprint_status") == "strong_match":
         text = f"Juice 缺少至少一个思考档的申报型号命中；行为分布强烈指向 {fingerprint_model}，只能作为补充证据。"
-    elif "builtin_fingerprint_not_enabled" in fingerprint_reasons:
-        text = "当前为低档，仅检测 Juice 与确定性异常，未启用行为指纹探针；Juice 证据也不足，请查看未完成项目。"
     else:
         text = "Juice 和行为指纹都没有取得足够证据，请先检查未完成项目与线路错误。"
     if custom:
@@ -142,8 +138,8 @@ def build_overall_verdict(
     reasons = list(fingerprint.get("fingerprint_unclear_reasons") or [])
     if custom and "custom_probe_reference_only" not in reasons:
         reasons.append("custom_probe_reference_only")
-    if not fingerprint_enabled and "builtin_fingerprint_not_enabled" not in reasons:
-        reasons.append("builtin_fingerprint_not_enabled")
+    if not fingerprint_enabled and "no_probability_probe_selected" not in reasons:
+        reasons.append("no_probability_probe_selected")
     if custom or not fingerprint_enabled:
         fingerprint = {
             **fingerprint,
@@ -216,12 +212,23 @@ def build_overall_verdict(
         common_causes.extend(["请求被路由到其他型号", "输出改写", "隐藏提示覆盖显式定义", "少量请求发生临时路由漂移"])
     if fingerprint.get("fingerprint_status") == "strong_match":
         common_causes.extend(["当前行为分布接近对应可信型号", "官方风控或临时路由也可能改变行为分布"])
-    elif "builtin_fingerprint_not_enabled" in reasons:
-        common_causes.extend(["当前为低档，未启用内置行为指纹探针", "这一层主动不给出型号方向，不代表模型或线路异常"])
     elif reasons:
         common_causes.extend(["模型行为落在强指向线以下", "网络错误或缺样", "题面或请求格式不受正式基线支持"])
 
     fingerprint_rows = _fingerprint_rows(fingerprint)
+    fingerprint_model = fingerprint.get("fingerprint_model")
+    fingerprint_claim_mismatch = bool(
+        fingerprint.get("fingerprint_status") == "strong_match"
+        and fingerprint_model
+        and fingerprint_model != claimed_model
+    )
+    if fingerprint_claim_mismatch:
+        failed_items.append({
+            "layer": "指纹匹配",
+            "reason_code": "fingerprint_claim_mismatch",
+            "reason_cn": f"申报型号为{MODEL_LABELS.get(claimed_model, claimed_model)}，行为指纹强烈指向{MODEL_LABELS.get(str(fingerprint_model), fingerprint_model)}。",
+        })
+        common_causes.extend(["请求可能被路由到其他型号", "上游可能按请求形态差异化路由", "当前窗口可能发生临时模型漂移"])
     return {
         "overall_verdict": title,
         "outcome_code": outcome_code,
@@ -239,6 +246,7 @@ def build_overall_verdict(
         "juice_verdict_state": juice_state,
         "fingerprint_verdict_state": fingerprint.get("fingerprint_status", "unclear"),
         "fingerprint_model": fingerprint.get("fingerprint_model"),
+        "fingerprint_claim_mismatch": fingerprint_claim_mismatch,
         "failed_items": failed_items,
         "common_causes": sorted(set(common_causes)),
         "possible_models": fingerprint_rows,
