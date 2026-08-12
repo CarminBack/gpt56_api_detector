@@ -179,18 +179,33 @@ def build_user_mention(user: Any) -> str:
 
 
 def format_model_result(model: str, report: dict[str, Any]) -> str:
-    combined = report.get("combined_summary") or {}
+    combined = report.get("combined_summary") or report
     juice = report.get("juice_summary") or {}
-    network = report.get("network_summary") or combined.get("network_summary") or {}
+    fingerprint = report.get("fingerprint_summary") or {}
+    network = report.get("network_summary") or {}
     title = html.escape(str(combined.get("title_cn") or "检测完成"))
-    passed = html.escape(str(combined.get("passed_cn") or "未知"))
-    likely = html.escape(str(juice.get("likely_model_cn") or "无法判定"))
-    confidence = html.escape(str(juice.get("confidence") or "未知"))
-    network_title = html.escape(str(network.get("title_cn") or "未知"))
-    explanation = html.escape(str(combined.get("explanation_cn") or "暂无详细说明"))
+    likely = html.escape(str(
+        fingerprint.get("fingerprint_model")
+        or juice.get("likely_model_cn")
+        or "证据不明确"
+    ))
+    fingerprint_state = (
+        "强指向" if fingerprint.get("fingerprint_status") == "strong_match"
+        else html.escape(str(juice.get("confidence") or "参考"))
+    )
+    network_title = (
+        f"{network.get('successful', 0)} 成功 / {network.get('final_errors', 0)} 错误"
+        if "successful" in network or "final_errors" in network
+        else html.escape(str(network.get("title_cn") or "未知"))
+    )
+    explanation = html.escape(str(
+        combined.get("subtitle_cn")
+        or combined.get("explanation_cn")
+        or "暂无详细说明"
+    ))
     return (
-        f"<b>{html.escape(model)}</b>：{title}（{passed}）\n"
-        f"指纹：{likely}，置信度：{confidence}\n"
+        f"<b>{html.escape(model)}</b>：{title}\n"
+        f"指纹：{likely}（{fingerprint_state}）\n"
         f"线路：{network_title}\n{explanation}"
     )
 
@@ -226,15 +241,12 @@ class DetectorClient:
             response = await self.client.post(
                 "/api/jobs",
                 json={
-                    "mode": "juice",
+                    "preset": "low",
                     "candidate": {
                         "base_url": request.base_url,
                         "model": model,
                         "api_key": request.api_key,
                     },
-                    "workers": 4,
-                    "trials": 4,
-                    "juice_repeats": 3,
                 },
             )
             job = await self._json(response)

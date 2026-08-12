@@ -1,5 +1,5 @@
 const state = {
-  mode: "juice",
+  preset: "low",
   currentId: null,
   logOffset: 0,
   startedAt: null,
@@ -32,19 +32,12 @@ function showToast(message, isError = false) {
   state.toastTimer = window.setTimeout(() => toast.classList.remove("is-visible"), 4500);
 }
 
-function setMode(mode) {
-  state.mode = mode;
-  document.querySelectorAll("[data-mode]").forEach((button) => {
-    const active = button.dataset.mode === mode;
+function setPreset(preset) {
+  state.preset = preset;
+  document.querySelectorAll("[data-preset]").forEach((button) => {
+    const active = button.dataset.preset === preset;
     button.classList.toggle("is-active", active);
     button.setAttribute("aria-checked", String(active));
-  });
-  const cot = mode === "cot";
-  el("trusted-fields").classList.toggle("is-hidden", !cot);
-  el("trials").classList.toggle("is-hidden", !cot);
-  el("trials-label").classList.toggle("is-hidden", !cot);
-  ["trusted-url", "trusted-model", "trusted-key"].forEach((id) => {
-    el(id).required = cot;
   });
 }
 
@@ -94,23 +87,13 @@ async function loadModels(kind, button) {
 
 function jobPayload() {
   const payload = {
-    mode: state.mode,
+    preset: state.preset,
     candidate: {
       base_url: el("candidate-url").value.trim(),
       model: el("candidate-model").value.trim(),
       api_key: el("candidate-key").value,
     },
-    workers: Number(el("workers").value),
-    trials: Number(el("trials").value),
-    juice_repeats: Number(el("juice-repeats").value),
   };
-  if (state.mode === "cot") {
-    payload.trusted = {
-      base_url: el("trusted-url").value.trim(),
-      model: el("trusted-model").value.trim(),
-      api_key: el("trusted-key").value,
-    };
-  }
   return payload;
 }
 
@@ -139,8 +122,8 @@ function statusTone(job) {
   if (["failed", "stopped"].includes(job.status)) return "danger";
   if (["queued", "running", "stopping"].includes(job.status)) return "neutral";
   const status = job.summary?.combined_summary?.status || job.summary?.combined_verdict || "";
-  if (/mismatch|mixed|invalid|conflict|rewrite|not_compatible/.test(status)) return "danger";
-  if (/consistent|compatible_and/.test(status)) return "success";
+  if (/possible_non_gpt|mismatch/.test(status)) return "danger";
+  if (/juice_pass_fingerprint_strong/.test(status)) return "success";
   return "warning";
 }
 
@@ -164,7 +147,8 @@ function renderJob(job) {
   el("run-content").classList.remove("is-hidden");
   const summary = job.summary?.combined_summary;
   const juice = job.summary?.juice_summary;
-  const network = job.summary?.network_summary || summary?.network_summary;
+  const fingerprint = job.summary?.fingerprint_summary;
+  const network = job.summary?.network_summary || {};
   const tone = statusTone(job);
   const band = el("verdict-band");
   band.className = `verdict-band tone-${tone}`;
@@ -173,9 +157,9 @@ function renderJob(job) {
   el("verdict-title").textContent = summary?.title_cn || (job.error ? "任务执行失败" : "检测正在运行");
   el("verdict-detail").textContent = summary?.explanation_cn || job.error || "检测器正在收集样本，请保持页面开启。";
   el("verdict-pass").textContent = summary?.passed_cn || (job.status === "failed" ? "失败" : "进行中");
-  el("metric-model").textContent = juice?.likely_model_cn || "—";
-  el("metric-confidence").textContent = formatConfidence(juice?.confidence || summary?.juice_confidence);
-  el("metric-network").textContent = network?.title_cn || "—";
+  el("metric-model").textContent = fingerprint?.fingerprint_model || juice?.claimed_model || "—";
+  el("metric-confidence").textContent = fingerprint?.fingerprint_status === "strong_match" ? "强指向" : (juice?.state || "—");
+  el("metric-network").textContent = network.logical_tasks == null ? "—" : `${network.successful || 0} 成功 / ${network.final_errors || 0} 错误`;
 
   const running = ["queued", "running", "stopping"].includes(job.status);
   el("stop-button").disabled = !["queued", "running"].includes(job.status);
@@ -288,7 +272,7 @@ function renderHistory(jobs) {
     model.textContent = job.config.candidate_model || "未知模型";
     const mode = document.createElement("span");
     mode.className = "history-mode";
-    mode.textContent = job.config.mode === "juice" || job.config.mode === "juice_only" ? "Juice" : "COT 综合";
+    mode.textContent = {low: "低档", medium: "中档", high: "高档"}[job.config.preset] || "旧版";
     title.append(model, mode);
 
     const endpoints = document.createElement("span");
@@ -361,8 +345,8 @@ async function stopJob() {
   }
 }
 
-document.querySelectorAll("[data-mode]").forEach((button) => {
-  button.addEventListener("click", () => setMode(button.dataset.mode));
+document.querySelectorAll("[data-preset]").forEach((button) => {
+  button.addEventListener("click", () => setPreset(button.dataset.preset));
 });
 
 document.querySelectorAll("[data-toggle-secret]").forEach((button) => {
@@ -379,12 +363,8 @@ document.querySelectorAll("[data-model-select]").forEach((select) => {
   });
 });
 
-el("workers").addEventListener("input", (event) => {
-  el("workers-value").value = event.target.value;
-  el("workers-value").textContent = event.target.value;
-});
 el("job-form").addEventListener("submit", startJob);
 el("stop-button").addEventListener("click", stopJob);
 el("refresh-history").addEventListener("click", refreshHistory);
-setMode("juice");
+setPreset("low");
 refreshHistory();

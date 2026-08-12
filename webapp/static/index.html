@@ -46,7 +46,7 @@
       <span class="brand-mark" aria-hidden="true"><svg><use href="#icon-activity"/></svg></span>
       <div>
         <h1>GPT-5.6 路由检测</h1>
-        <p>Encrypted COT · Juice fingerprint</p>
+        <p>Juice · behavioral fingerprint v3</p>
       </div>
     </div>
     <div class="service-state"><span class="state-dot"></span>服务在线</div>
@@ -63,10 +63,11 @@
 
       <form id="job-form">
         <fieldset class="field-group mode-group">
-          <legend>检测模式</legend>
-          <div class="segmented" role="radiogroup" aria-label="检测模式">
-            <button type="button" class="segment is-active" data-mode="juice" role="radio" aria-checked="true">Juice</button>
-            <button type="button" class="segment" data-mode="cot" role="radio" aria-checked="false">COT 综合</button>
+          <legend>检测档位</legend>
+          <div class="segmented" role="radiogroup" aria-label="检测档位">
+            <button type="button" class="segment is-active" data-preset="low" role="radio" aria-checked="true">低档</button>
+            <button type="button" class="segment" data-preset="medium" role="radio" aria-checked="false">中档</button>
+            <button type="button" class="segment" data-preset="high" role="radio" aria-checked="false">高档</button>
           </div>
         </fieldset>
 
@@ -96,50 +97,7 @@
           </div>
         </fieldset>
 
-        <fieldset id="trusted-fields" class="field-group is-hidden">
-          <legend>可信参照端</legend>
-          <label for="trusted-url">Base URL</label>
-          <input id="trusted-url" name="trusted-url" type="url" inputmode="url" autocomplete="url" placeholder="https://api.openai.com/v1">
-
-          <div class="label-row">
-            <label for="trusted-model">模型名</label>
-            <button class="text-button" type="button" data-load-models="trusted">
-              <svg aria-hidden="true"><use href="#icon-refresh"/></svg>读取模型
-            </button>
-          </div>
-          <input id="trusted-model" name="trusted-model" autocomplete="off" value="gpt-5.6-sol">
-          <label class="model-select-label" for="trusted-model-select">模型列表</label>
-          <select id="trusted-model-select" class="model-select" data-model-select="trusted" disabled>
-            <option value="">读取后可选择</option>
-          </select>
-
-          <label for="trusted-key">API Key</label>
-          <div class="secret-input">
-            <input id="trusted-key" name="trusted-key" type="password" autocomplete="off" spellcheck="false">
-            <button type="button" class="icon-button" data-toggle-secret="trusted-key" title="显示或隐藏可信端 Key" aria-label="显示或隐藏可信端 Key">
-              <svg aria-hidden="true"><use href="#icon-eye"/></svg>
-            </button>
-          </div>
-        </fieldset>
-
-        <fieldset class="field-group compact-options">
-          <legend>执行参数</legend>
-          <div class="option-grid">
-            <label for="workers">并发</label>
-            <div class="range-row">
-              <input id="workers" name="workers" type="range" min="1" max="8" value="4">
-              <output id="workers-value" for="workers">4</output>
-            </div>
-
-            <label for="juice-repeats">每档样本</label>
-            <input id="juice-repeats" name="juice-repeats" type="number" min="1" max="5" value="3">
-
-            <label id="trials-label" for="trials" class="is-hidden">COT 轮次</label>
-            <input id="trials" name="trials" class="is-hidden" type="number" min="4" max="20" value="20">
-          </div>
-        </fieldset>
-
-        <p class="privacy-note">完整 Key 仅传入当前检测子进程；历史记录只保留前 6 位和后 6 位。</p>
+        <p class="privacy-note">低档用于快速检查；中档加入正式行为指纹；高档含 Native 与固定 32K 历史。完整 Key 仅传入当前检测子进程。</p>
         <button id="start-button" class="primary-button" type="submit">
           <svg aria-hidden="true"><use href="#icon-play"/></svg>
           开始检测
@@ -184,7 +142,7 @@
 
           <dl class="metric-strip">
             <div><dt>型号指纹</dt><dd id="metric-model">—</dd></div>
-            <div><dt>置信度</dt><dd id="metric-confidence">—</dd></div>
+            <div><dt>证据状态</dt><dd id="metric-confidence">—</dd></div>
             <div><dt>线路质量</dt><dd id="metric-network">—</dd></div>
             <div><dt>运行时间</dt><dd id="metric-time" class="tabular">—</dd></div>
           </dl>

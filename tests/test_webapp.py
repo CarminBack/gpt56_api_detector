@@ -143,7 +143,9 @@ def test_different_browsers_can_start_jobs_concurrently(monkeypatch) -> None:
 def test_dashboard_has_visible_model_selectors() -> None:
     dashboard = client.get("/")
     assert 'id="candidate-model-select"' in dashboard.text
-    assert 'id="trusted-model-select"' in dashboard.text
+    assert 'data-preset="low"' in dashboard.text
+    assert 'data-preset="medium"' in dashboard.text
+    assert 'data-preset="high"' in dashboard.text
     assert "<datalist" not in dashboard.text
 
 
@@ -183,20 +185,16 @@ def test_detector_command_contains_no_api_keys(tmp_path) -> None:
         status="queued",
         created_at="2026-08-07T00:00:00+00:00",
         config={
-            "mode": "juice",
+            "mode": "v4",
+            "preset": "low",
             "candidate_base_url": "https://api.example.com/v1",
             "candidate_model": "gpt-5.6-sol",
             "candidate_api_key_hint": "sk-tes...secret",
-            "trusted_base_url": None,
-            "trusted_model": None,
-            "trusted_api_key_hint": None,
-            "workers": 4,
-            "trials": 20,
-            "juice_repeats": 3,
         },
     )
     command = manager._command(job, tmp_path / "report.json")
-    assert "--juice-only" in command
+    assert command[command.index("--preset") + 1] == "low"
+    assert command[1].endswith("v4_runner.py")
     assert not any(part.startswith("sk-") for part in command)
 
 
@@ -208,16 +206,11 @@ def test_job_process_completes_when_report_exists(monkeypatch) -> None:
         status="queued",
         created_at="2026-08-07T00:00:00+00:00",
         config={
-            "mode": "juice",
+            "mode": "v4",
+            "preset": "low",
             "candidate_base_url": "https://api.example.com/v1",
             "candidate_model": "gpt-5.6-sol",
             "candidate_api_key_hint": "sk-tes...secret",
-            "trusted_base_url": None,
-            "trusted_model": None,
-            "trusted_api_key_hint": None,
-            "workers": 1,
-            "trials": 4,
-            "juice_repeats": 1,
         },
     )
     manager.jobs[job.id] = job
@@ -235,7 +228,7 @@ def test_job_process_completes_when_report_exists(monkeypatch) -> None:
 
     monkeypatch.setattr(manager, "_command", fake_command)
     complete_key = "sk-test-complete-secret"
-    asyncio.run(manager._run(job, {"candidate": complete_key, "trusted": ""}))
+    asyncio.run(manager._run(job, {"candidate": complete_key}))
 
     assert job.status == "completed"
     assert job.report_json and job.report_json.exists()
@@ -246,7 +239,7 @@ def test_job_process_completes_when_report_exists(monkeypatch) -> None:
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata == {
         "candidate_api_key_hint": "sk-tes...secret",
-        "trusted_api_key_hint": None,
+        "preset": "low",
     }
     assert complete_key not in metadata_path.read_text(encoding="utf-8")
     reloaded = JobManager()
@@ -268,15 +261,10 @@ def make_job(job_id: str, owner_id: str, status: str = "completed") -> Job:
         status=status,
         created_at="2026-08-07T00:00:00+00:00",
         config={
-            "mode": "juice",
+            "mode": "v4",
+            "preset": "low",
             "candidate_base_url": "https://api.example.com/v1",
             "candidate_model": "gpt-5.6-sol",
             "candidate_api_key_hint": "sk-exa...secret",
-            "trusted_base_url": None,
-            "trusted_model": None,
-            "trusted_api_key_hint": None,
-            "workers": 1,
-            "trials": 4,
-            "juice_repeats": 1,
         },
     )

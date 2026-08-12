@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -129,18 +129,8 @@ class EndpointInput(BaseModel):
 
 
 class JobInput(BaseModel):
-    mode: Literal["juice", "cot"] = "juice"
+    preset: Literal["low", "medium", "high"] = "low"
     candidate: EndpointInput
-    trusted: EndpointInput | None = None
-    workers: int = Field(default=4, ge=1, le=8)
-    trials: int = Field(default=20, ge=4, le=20)
-    juice_repeats: int = Field(default=3, ge=1, le=5)
-
-    @model_validator(mode="after")
-    def trusted_required_for_cot(self) -> "JobInput":
-        if self.mode == "cot" and self.trusted is None:
-            raise ValueError("COT 模式需要可信参照端")
-        return self
 
 
 class ModelsInput(BaseModel):
@@ -174,11 +164,18 @@ class Job:
         if self.report_json and self.report_json.exists():
             try:
                 report = json.loads(self.report_json.read_text(encoding="utf-8"))
+                combined = report.get("combined_summary") or {
+                    "status": report.get("outcome_code"),
+                    "title_cn": report.get("title_cn"),
+                    "explanation_cn": report.get("subtitle_cn"),
+                    "passed_cn": _outcome_label(report.get("outcome_code")),
+                }
                 summary = {
-                    "combined_verdict": report.get("combined_verdict"),
-                    "combined_summary": report.get("combined_summary"),
+                    "combined_verdict": report.get("combined_verdict") or report.get("outcome_code"),
+                    "combined_summary": combined,
                     "juice_summary": report.get("juice_summary"),
                     "network_summary": report.get("network_summary"),
+                    "fingerprint_summary": report.get("fingerprint_summary"),
                     "output_literal_control_summary": report.get(
                         "output_literal_control_summary"
                     ),
@@ -232,6 +229,7 @@ class JobManager:
             except (OSError, json.JSONDecodeError):
                 pass
             config = report.get("configuration", {})
+            candidate = report.get("candidate_configuration_without_key", {})
             job_id = report_path.stem
             created_at = datetime.fromtimestamp(
                 report_path.stat().st_mtime, timezone.utc
@@ -245,16 +243,17 @@ class JobManager:
                 finished_at=created_at,
                 exit_code=0,
                 config={
-                    "mode": config.get("detection_mode", "unknown"),
-                    "candidate_base_url": config.get("candidate_base_url"),
-                    "candidate_model": config.get("candidate_model"),
+                    "preset": report.get("preset") or metadata.get("preset"),
+                    "mode": config.get("detection_mode", "v4"),
+                    "candidate_base_url": candidate.get("base_url") or config.get("candidate_base_url"),
+                    "candidate_model": candidate.get("model") or config.get("candidate_model"),
                     "candidate_api_key_hint": metadata.get(
                         "candidate_api_key_hint"
                     ),
                     "trusted_base_url": config.get("trusted_base_url"),
                     "trusted_model": config.get("trusted_model"),
                     "trusted_api_key_hint": metadata.get("trusted_api_key_hint"),
-                    "workers": config.get("single_request_workers"),
+                    "workers": (report.get("normalized_config") or {}).get("workers") or config.get("single_request_workers"),
                 },
                 report_json=report_path,
                 report_html=report_path.with_suffix(".html"),
@@ -278,36 +277,18 @@ class JobManager:
             candidate_url = await asyncio.to_thread(
                 validate_public_https_url, payload.candidate.base_url
             )
-            trusted_url = None
-            if payload.trusted:
-                trusted_url = await asyncio.to_thread(
-                    validate_public_https_url, payload.trusted.base_url
-                )
-
             job_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8]
             config = {
-                "mode": payload.mode,
+                "mode": "v4",
+                "preset": payload.preset,
                 "candidate_base_url": candidate_url,
                 "candidate_model": payload.candidate.model.strip(),
                 "candidate_api_key_hint": mask_api_key(
                     payload.candidate.api_key.get_secret_value()
                 ),
-                "trusted_base_url": trusted_url,
-                "trusted_model": payload.trusted.model.strip() if payload.trusted else None,
-                "trusted_api_key_hint": (
-                    mask_api_key(payload.trusted.api_key.get_secret_value())
-                    if payload.trusted
-                    else None
-                ),
-                "workers": payload.workers,
-                "trials": payload.trials,
-                "juice_repeats": payload.juice_repeats,
             }
             secrets = {
                 "candidate": payload.candidate.api_key.get_secret_value(),
-                "trusted": (
-                    payload.trusted.api_key.get_secret_value() if payload.trusted else ""
-                ),
             }
             job = Job(
                 id=job_id,
@@ -327,31 +308,18 @@ class JobManager:
         config = job.config
         command = [
             sys.executable,
-            str(PROJECT_DIR / "gpt56_reasoning_probe.py"),
-            "--candidate-base-url",
+            str(PROJECT_DIR / "v4_runner.py"),
+            "--base-url",
             config["candidate_base_url"],
-            "--candidate-model",
+            "--model",
             config["candidate_model"],
-            "--workers",
-            str(config["workers"]),
-            "--juice-repeats",
-            str(config["juice_repeats"]),
+            "--preset",
+            config["preset"],
             "--output",
             str(output_path),
+            "--run-dir",
+            str(REPORT_DIR / "runs" / job.id),
         ]
-        if config["mode"] == "juice":
-            command.append("--juice-only")
-        else:
-            command.extend(
-                [
-                    "--trusted-base-url",
-                    config["trusted_base_url"],
-                    "--trusted-model",
-                    config["trusted_model"],
-                    "--trials",
-                    str(config["trials"]),
-                ]
-            )
         return command
 
     async def _run(self, job: Job, secrets: dict[str, str]) -> None:
@@ -360,8 +328,6 @@ class JobManager:
         metadata_path = metadata_path_for(output_path)
         env = os.environ.copy()
         env["CANDIDATE_API_KEY"] = secrets["candidate"]
-        if secrets["trusted"]:
-            env["TRUSTED_API_KEY"] = secrets["trusted"]
         command = self._command(job, output_path)
         try:
             owner_path.write_text(job.owner_id, encoding="utf-8")
@@ -372,9 +338,7 @@ class JobManager:
                         "candidate_api_key_hint": job.config.get(
                             "candidate_api_key_hint"
                         ),
-                        "trusted_api_key_hint": job.config.get(
-                            "trusted_api_key_hint"
-                        ),
+                        "preset": job.config.get("preset"),
                     },
                     ensure_ascii=True,
                 ),
@@ -397,7 +361,6 @@ class JobManager:
             )
             job.process = process
             env.pop("CANDIDATE_API_KEY", None)
-            env.pop("TRUSTED_API_KEY", None)
             secrets.clear()
 
             assert process.stdout is not None
@@ -413,7 +376,7 @@ class JobManager:
             job.report_json = output_path if output_path.exists() else None
             html_path = output_path.with_suffix(".html")
             job.report_html = html_path if html_path.exists() else None
-            if job.status == "stopping":
+            if job.status == "stopping" or job.exit_code == 130:
                 job.status = "stopped"
             elif job.report_json:
                 job.status = "completed"
@@ -427,7 +390,6 @@ class JobManager:
         finally:
             secrets.clear()
             env.pop("CANDIDATE_API_KEY", None)
-            env.pop("TRUSTED_API_KEY", None)
             job.process = None
             job.finished_at = utc_now()
             if not job.report_json:
@@ -453,6 +415,17 @@ class JobManager:
 
 
 manager = JobManager()
+
+
+def _outcome_label(outcome: Any) -> str:
+    value = str(outcome or "")
+    if value == "possible_non_gpt" or "mismatch" in value:
+        return "异常"
+    if "pass" in value:
+        return "通过"
+    if "insufficient" in value or "unclear" in value:
+        return "证据不足"
+    return "未知"
 
 
 class NoRedirect(request.HTTPRedirectHandler):
