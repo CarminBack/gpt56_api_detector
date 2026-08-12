@@ -10,7 +10,7 @@
   <header class="topbar">
     <div>
       <strong>GPT-5.6 混用检测器</strong>
-      <span>v4.1.0 · 本机运行</span>
+      <span>v4.1.1 · 本机运行</span>
     </div>
     <a href="/generator">探针生成器</a>
   </header>
@@ -23,17 +23,18 @@
 
   <main>
     <section id="step-connect" class="page-step active">
-      <div class="section-heading"><div><h1>连接待测 API</h1><p>正式检测不需要可信端。API key 仅保存在当前进程内存。</p></div><span class="local-badge">仅监听 127.0.0.1</span></div>
+      <div class="section-heading"><div><h1>连接待测 API</h1><p>正式检测不需要可信端。API key 仅保存在当前页面和后端进程内存，关闭后台后清除。</p></div><span class="local-badge">仅监听 127.0.0.1</span></div>
       <div class="form-grid connection-grid">
         <label>API 地址<input id="base-url" type="url" placeholder="https://example.com/v1" autocomplete="off"></label>
-        <label>模型名<input id="model" value="gpt-5.6-sol" autocomplete="off"></label>
+        <label>申报模型<select id="claimed-model"><option value="gpt-5.6-sol">Sol</option><option value="gpt-5.6-terra">Terra</option><option value="gpt-5.6-luna">Luna</option></select><small>Juice 和最终一致性按这里判断。</small></label>
+        <label>实际请求模型<input id="request-model" value="gpt-5.6-sol" autocomplete="off"><small>中转别名填这里；实际 HTTP 请求使用此值。</small></label>
         <label class="wide">API key<input id="api-key" type="password" autocomplete="off" placeholder="仅保存在内存"></label>
       </div>
       <div class="actions"><button id="to-plan" class="primary">继续配置</button></div>
     </section>
 
     <section id="step-plan" class="page-step">
-      <div class="section-heading"><div><h1>检测方案</h1><p>选择内置档位，修改任何参数后会自动切换为自定义。</p></div></div>
+      <div class="section-heading"><div><h1>检测方案</h1><p>选择内置档位，修改任何参数后会自动切换为自定义。最近配置只有实际开始过一次检测后才会保存。</p></div></div>
       <div class="control-band">
         <div><span class="control-label">运行方式</span><div id="mode-switch" class="segmented"><button data-mode="single" class="selected">单次检测</button><button data-mode="continuous">持续监控</button></div></div>
         <div><span class="control-label">档位</span><div id="preset-switch" class="segmented"><button data-preset="low" class="selected">低</button><button data-preset="medium">中</button><button data-preset="high">高</button><button data-preset="custom">自定义</button></div></div>
@@ -74,7 +75,7 @@
     </section>
 
     <section id="step-run" class="page-step">
-      <div class="section-heading"><div><h1>运行状态</h1><p id="run-subtitle">正在建立会话。</p></div><button id="stop-run" class="danger">停止</button></div>
+      <div class="section-heading"><div><h1>运行状态</h1><p id="run-subtitle">正在建立会话。</p><p id="run-models"></p></div><button id="stop-run" class="danger">停止</button></div>
       <div class="status-strip"><span id="run-status" class="status-dot running">运行中</span><span id="run-session">会话 —</span><span id="run-updated">—</span></div>
       <div class="progress-track"><div id="run-progress" style="width:0%"></div></div>
       <div id="run-details" class="run-grid"></div>
@@ -84,7 +85,7 @@
     <section id="step-report" class="page-step">
       <div id="report-empty" class="empty-state"><h1>尚无报告</h1><p>完成一次检测后，这里会显示简明结论和技术细节。</p></div>
       <div id="report-content" class="hidden">
-        <div id="verdict-band" class="verdict-band"><div><span class="eyebrow">综合结论</span><h1 id="verdict-title">—</h1><p id="verdict-subtitle"></p></div><button id="new-session" class="secondary">新建会话</button></div>
+        <div id="verdict-band" class="verdict-band"><div><span class="eyebrow">综合结论</span><h1 id="verdict-title">—</h1><p id="verdict-subtitle"></p><p id="report-models"></p></div><button id="new-session" class="secondary">新建会话</button></div>
         <div id="report-custom" class="warning-banner hidden"><strong>自定义档位测试结果仅供参考</strong><span></span></div>
         <section class="report-section fingerprint-section">
           <div class="section-heading compact"><div><h2>指纹匹配度</h2><p>表示本批答案分布与三种可信基线的相对接近程度，不是真实路由概率或混用比例。</p></div><strong id="fingerprint-status" class="fingerprint-status">—</strong></div>

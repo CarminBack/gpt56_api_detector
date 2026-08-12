@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 from .detector import DEFAULT_BASELINE, DetectorSession
 from .generator import GeneratorPlan, ProbeGeneratorSession, probe_document, verify_probe_file, wrap_probe_file
-from .presets import estimate_single_requests, normalize_config, preset_catalog
+from .presets import estimate_plan, get_preset, normalize_config, preset_catalog
 from .probability_model import load_baseline
 from .retention import RetentionWriteError
 from .store import SQLiteStateStore
@@ -23,6 +23,16 @@ from .utils import canonical_json, normalize_api_base_url, utc_now
 
 
 WEB_ROOT = Path(__file__).with_name("web")
+
+
+def _validated_resume_config(value: Any) -> tuple[dict[str, Any], str | None]:
+    try:
+        config = normalize_config(value)
+        for custom_probe in config.get("custom_probes", []):
+            verify_probe_file(probe_document(custom_probe))
+        return config, None
+    except (KeyError, TypeError, ValueError):
+        return get_preset("single", "low"), "最近配置已损坏或不兼容，已恢复单次低档默认参数"
 
 
 def _probability_probe_catalog() -> list[dict[str, Any]]:
@@ -119,22 +129,27 @@ class AppState:
     @staticmethod
     def _status_from_store(store: SQLiteStateStore, session_id: str) -> dict[str, Any]:
         session = store.session(session_id) or {}
-        config = session.get("config") or {}
+        config, resume_notice = _validated_resume_config(session.get("config") or {})
         report = store.report(session_id)
-        return {
+        status = {
             "status": session.get("status", "idle"),
             "session_id": session_id,
             "updated_at": session.get("updated_at") or utc_now(),
             "mode": config.get("mode"),
             "preset": config.get("preset"),
-            "official": session.get("official"),
-            "config_hash": session.get("config_hash"),
+            "official": config.get("official"),
+            "config_hash": config.get("config_hash"),
             "resume_config": config,
             "claimed_model": session.get("claimed_model"),
+            "request_model": session.get("request_model") or session.get("claimed_model"),
             "safe_endpoint": session.get("safe_endpoint"),
             "report_available": report is not None,
             "verdict": report.get("overall_verdict") if report else None,
+            "resume_config_valid": resume_notice is None,
         }
+        if resume_notice:
+            status["resume_config_notice_cn"] = resume_notice
+        return status
 
     def current_detector_store(self) -> SQLiteStateStore | None:
         if self.detector_session is not None:
@@ -373,12 +388,7 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body()
             if path == "/api/detector/estimate":
                 config = normalize_config(body["config"])
-                self._send_json(estimate_single_requests(config) if config["mode"] == "single" else {
-                    "continuous": True,
-                    "profiles": len(config["request_formats"]) * len(config["context_modes"]),
-                    "official": config["official"],
-                    "config_hash": config["config_hash"],
-                })
+                self._send_json(estimate_plan(config))
             elif path == "/api/detector/start":
                 self._start_detector(body)
             elif path == "/api/detector/stop":
@@ -406,6 +416,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _start_detector(self, body: dict[str, Any]) -> None:
         base_url = normalize_api_base_url(str(body["base_url"]))
+        claimed_model = str(body.get("claimed_model") or body.get("model") or "gpt-5.6-sol").strip()
+        request_model = str(body.get("request_model") or claimed_model).strip()
         config = normalize_config(body["config"])
         for custom_probe in config.get("custom_probes", []):
             verify_probe_file(probe_document(custom_probe))
@@ -414,7 +426,7 @@ class Handler(BaseHTTPRequestHandler):
             if current.get("status") in {"running", "stopping"}:
                 raise ValueError("detector is already running or stopping")
             resume_session_id = str(body.get("resume_session_id") or "")
-            if not resume_session_id and current.get("status") == "interrupted":
+            if not resume_session_id and current.get("status") == "interrupted" and current.get("resume_config_valid", True):
                 resume_session_id = str(current.get("session_id") or "")
             run_dir: Path
             if resume_session_id:
@@ -424,8 +436,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("requested detector session is not resumable")
                 if persisted.get("config_hash") != config["config_hash"]:
                     raise ValueError("resume config does not match the frozen session")
-                if persisted.get("claimed_model") != body.get("model", "gpt-5.6-sol"):
-                    raise ValueError("resume model does not match the frozen session")
+                if persisted.get("claimed_model") != claimed_model:
+                    raise ValueError("resume claimed model does not match the frozen session")
+                if (persisted.get("request_model") or persisted.get("claimed_model")) != request_model:
+                    raise ValueError("resume request model does not match the frozen session")
                 if persisted.get("safe_endpoint") != _safe_endpoint(base_url):
                     raise ValueError("resume endpoint does not match the frozen session")
                 session_id = resume_session_id
@@ -444,7 +458,8 @@ class Handler(BaseHTTPRequestHandler):
             config["session_id"] = session_id
             session = DetectorSession(
                 base_url=base_url,
-                model=body.get("model", "gpt-5.6-sol"),
+                claimed_model=claimed_model,
+                request_model=request_model,
                 api_key=body["api_key"],
                 config=config,
                 directory=run_dir,
@@ -485,9 +500,6 @@ class Handler(BaseHTTPRequestHandler):
                     "updated_at": utc_now(),
                     "error": _safe_exception_message(exc),
                 }
-            finally:
-                session.api_key = ""
-                session.transport.api_key = ""
             with self.server.state.lock:
                 if self.server.state.detector_session is session and self.server.state.detector.get("session_id") == session_id:
                     self.server.state.detector = self.server.state._status_from_store(session.store, session_id)
@@ -683,7 +695,7 @@ class Handler(BaseHTTPRequestHandler):
                     "status": "complete",
                     "updated_at": utc_now(),
                     "output": str(output),
-                    "analysis": {"formal_eligible": export["formal_eligible"]},
+                    "analysis": {"reference_ready": export["reference_ready"]},
                 }
         self._send_json({"complete": True, "output": str(output), "probe": export})
 
@@ -715,8 +727,13 @@ class AppServer(ThreadingHTTPServer):
             generator = self.state.generator_session
             generator_thread = self.state.generator_thread
             detached_generator_store = self.state.generator_store
-        for session in (detector, generator):
-            if session is not None:
+            detector_status = str(self.state.detector.get("status") or "idle")
+            generator_status = str(self.state.generator.get("status") or "idle")
+        for session, status, worker in (
+            (detector, detector_status, detector_thread),
+            (generator, generator_status, generator_thread),
+        ):
+            if session is not None and (status in {"running", "stopping", "interrupted"} or bool(worker and worker.is_alive())):
                 try:
                     session.stop()
                 except RuntimeError:
