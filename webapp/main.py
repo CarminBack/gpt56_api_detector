@@ -8,9 +8,12 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -20,6 +23,7 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, SecretStr
+from starlette.background import BackgroundTask
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -27,6 +31,9 @@ PROJECT_DIR = APP_DIR.parent
 STATIC_DIR = APP_DIR / "static"
 REPORT_DIR = Path(os.getenv("REPORT_DIR", PROJECT_DIR / "reports")).resolve()
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
+RETENTION_ROOT = REPORT_DIR / "retention"
+DOWNLOAD_ROOT = REPORT_DIR / ".downloads"
+APP_VERSION = (PROJECT_DIR / "VERSION").read_text(encoding="utf-8").strip()
 BROWSER_SECRET = os.getenv("APP_BROWSER_SECRET", "")
 if len(BROWSER_SECRET) < 32:
     raise RuntimeError("APP_BROWSER_SECRET must contain at least 32 characters")
@@ -96,6 +103,44 @@ def metadata_path_for(report_path: Path) -> Path:
     return report_path.with_name(f"{report_path.stem}.meta.json")
 
 
+def retention_directory_for(job_id: str) -> Path:
+    return RETENTION_ROOT / job_id
+
+
+def retention_ready(job: "Job") -> bool:
+    if not job.config.get("retention_enabled") or job.status not in {"completed", "stopped"}:
+        return False
+    directory = retention_directory_for(job.id)
+    return any(directory.glob("session-*/retention_manifest.json"))
+
+
+def build_retention_archive(job_id: str) -> Path:
+    source = retention_directory_for(job_id)
+    if not source.is_dir():
+        raise FileNotFoundError("留存记录不存在")
+    DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f"{job_id}-", suffix=".zip", dir=DOWNLOAD_ROOT
+    )
+    os.close(descriptor)
+    archive = Path(temporary_name)
+    archive.chmod(0o600)
+    files_written = 0
+    try:
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            for path in sorted(source.rglob("*")):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                output.write(path, Path(f"{job_id}-retention") / path.relative_to(source))
+                files_written += 1
+        if files_written == 0:
+            raise FileNotFoundError("留存记录为空")
+        return archive
+    except Exception:
+        archive.unlink(missing_ok=True)
+        raise
+
+
 def validate_public_https_url(value: str) -> str:
     normalized = value.strip().rstrip("/")
     parsed = parse.urlsplit(normalized)
@@ -131,6 +176,7 @@ class EndpointInput(BaseModel):
 
 class JobInput(BaseModel):
     preset: Literal["low", "medium", "high"] = "low"
+    retention_enabled: bool = False
     candidate: EndpointInput
 
 
@@ -194,6 +240,7 @@ class Job:
             "config": self.config,
             "summary": summary,
             "has_report": bool(self.report_json and self.report_json.exists()),
+            "has_retention": retention_ready(self),
         }
 
 
@@ -252,6 +299,10 @@ class JobManager:
                     "candidate_api_key_hint": metadata.get(
                         "candidate_api_key_hint"
                     ),
+                    "retention_enabled": bool(
+                        report.get("retention_enabled")
+                        or metadata.get("retention_enabled")
+                    ),
                     "trusted_base_url": config.get("trusted_base_url"),
                     "trusted_model": config.get("trusted_model"),
                     "trusted_api_key_hint": metadata.get("trusted_api_key_hint"),
@@ -286,6 +337,7 @@ class JobManager:
                 "candidate_base_url": candidate_url,
                 "candidate_claimed_model": payload.candidate.claimed_model,
                 "candidate_request_model": payload.candidate.request_model.strip(),
+                "retention_enabled": payload.retention_enabled,
                 "candidate_api_key_hint": mask_api_key(
                     payload.candidate.api_key.get_secret_value()
                 ),
@@ -325,6 +377,10 @@ class JobManager:
             "--run-dir",
             str(REPORT_DIR / "runs" / job.id),
         ]
+        if config.get("retention_enabled"):
+            command.extend(
+                ["--retention-directory", str(retention_directory_for(job.id))]
+            )
         return command
 
     async def _run(self, job: Job, secrets: dict[str, str]) -> None:
@@ -344,6 +400,9 @@ class JobManager:
                             "candidate_api_key_hint"
                         ),
                         "preset": job.config.get("preset"),
+                        "retention_enabled": bool(
+                            job.config.get("retention_enabled")
+                        ),
                     },
                     ensure_ascii=True,
                 ),
@@ -403,6 +462,7 @@ class JobManager:
                         sidecar_path.unlink(missing_ok=True)
                     except OSError:
                         pass
+                shutil.rmtree(retention_directory_for(job.id), ignore_errors=True)
             async with self.lock:
                 if self.active_ids.get(job.owner_id) == job.id:
                     self.active_ids.pop(job.owner_id, None)
@@ -469,6 +529,11 @@ def fetch_models(base_url: str, api_key: str) -> list[str]:
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/version")
+async def version() -> dict[str, str]:
+    return {"version": APP_VERSION}
 
 
 @app.get("/")
@@ -558,6 +623,24 @@ async def report_json(job_id: str, request: Request) -> FileResponse:
         job.report_json,
         media_type="application/json",
         filename=job.report_json.name,
+    )
+
+
+@app.get("/api/jobs/{job_id}/retention.zip")
+async def retention_archive(job_id: str, request: Request) -> FileResponse:
+    job = manager.owned_job(job_id, request.state.browser_id)
+    if not retention_ready(job):
+        raise HTTPException(404, "完整请求与返回记录不存在")
+    try:
+        archive = await asyncio.to_thread(build_retention_archive, job.id)
+    except (FileNotFoundError, OSError, zipfile.BadZipFile) as exc:
+        raise HTTPException(404, "完整请求与返回记录不存在") from exc
+    return FileResponse(
+        archive,
+        media_type="application/zip",
+        filename=f"{job.id}-retention.zip",
+        headers={"Cache-Control": "no-store"},
+        background=BackgroundTask(archive.unlink, missing_ok=True),
     )
 
 

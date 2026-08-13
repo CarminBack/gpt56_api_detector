@@ -1,8 +1,11 @@
 import asyncio
+import io
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
+import zipfile
 from uuid import uuid4
 
 os.environ.setdefault("APP_BROWSER_SECRET", "test-browser-secret-with-at-least-32-characters")
@@ -12,6 +15,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 import pytest
 
+from gpt56_vnext.retention import RawRetention
 import webapp.main as main_module
 from webapp.main import (
     BROWSER_COOKIE,
@@ -19,7 +23,9 @@ from webapp.main import (
     Job,
     JobInput,
     JobManager,
+    RETENTION_ROOT,
     app,
+    build_retention_archive,
     browser_id_from_token,
     manager,
     mask_api_key,
@@ -36,14 +42,23 @@ def test_health_check_does_not_require_auth() -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_version_endpoint_matches_release_file() -> None:
+    response = client.get("/api/version")
+    assert response.status_code == 200
+    assert response.json() == {
+        "version": (main_module.PROJECT_DIR / "VERSION").read_text(encoding="utf-8").strip()
+    }
+
+
 def test_dashboard_and_api_require_no_authentication() -> None:
-    dashboard = client.get("/")
-    assert dashboard.status_code == 200
-    assert "GPT-5.6 路由检测" in dashboard.text
-    cookie = dashboard.headers["set-cookie"].lower()
-    assert "httponly" in cookie
-    assert "secure" in cookie
-    assert "samesite=strict" in cookie
+    with TestClient(app, base_url="https://testserver") as fresh_client:
+        dashboard = fresh_client.get("/")
+        assert dashboard.status_code == 200
+        assert "GPT-5.6 路由检测" in dashboard.text
+        cookie = dashboard.headers["set-cookie"].lower()
+        assert "httponly" in cookie
+        assert "secure" in cookie
+        assert "samesite=strict" in cookie
 
     jobs = client.get("/api/jobs")
     assert jobs.status_code == 200
@@ -99,6 +114,7 @@ def test_browser_histories_and_job_access_are_isolated() -> None:
             assert browser_a.get(f"/api/jobs/{job_b.id}/report.json").status_code == 404
             assert browser_a.get(f"/api/jobs/{job_a.id}/report.json").status_code == 200
             assert browser_b.get(f"/api/jobs/{job_b.id}/report.json").status_code == 200
+            assert browser_a.get(f"/api/jobs/{job_b.id}/retention.zip").status_code == 404
         finally:
             manager.jobs.pop(job_a.id, None)
             manager.jobs.pop(job_b.id, None)
@@ -149,6 +165,9 @@ def test_dashboard_has_visible_model_selectors() -> None:
     assert 'data-preset="low"' in dashboard.text
     assert 'data-preset="medium"' in dashboard.text
     assert 'data-preset="high"' in dashboard.text
+    assert 'id="app-version"' in dashboard.text
+    assert 'id="retention-enabled"' in dashboard.text
+    assert 'id="retention-download"' in dashboard.text
     assert "Required Notice: Copyright 2026 chen-006 and contributors" in dashboard.text
     assert "https://github.com/chen-006/gpt56_api_detector" in dashboard.text
     assert "<datalist" not in dashboard.text
@@ -202,6 +221,7 @@ def test_detector_command_contains_no_api_keys(tmp_path) -> None:
     assert command[command.index("--preset") + 1] == "low"
     assert command[command.index("--claimed-model") + 1] == "gpt-5.6-sol"
     assert command[command.index("--request-model") + 1] == "custom-sol-alias"
+    assert "--retention-directory" not in command
     assert command[1].endswith("v4_runner.py")
     assert not any(part.startswith("sk-") for part in command)
 
@@ -249,6 +269,7 @@ def test_job_process_completes_when_report_exists(monkeypatch) -> None:
     assert metadata == {
         "candidate_api_key_hint": "sk-tes...secret",
         "preset": "low",
+        "retention_enabled": False,
     }
     assert complete_key not in metadata_path.read_text(encoding="utf-8")
     reloaded = JobManager()
@@ -261,6 +282,113 @@ def test_job_process_completes_when_report_exists(monkeypatch) -> None:
     job.report_html.unlink(missing_ok=True)
     owner_path.unlink(missing_ok=True)
     metadata_path.unlink(missing_ok=True)
+
+
+def test_retention_uses_server_managed_path_and_archive_is_downloadable(tmp_path: Path) -> None:
+    manager = JobManager()
+    job = Job(
+        id="retention-test-job",
+        owner_id="a" * 32,
+        status="completed",
+        created_at="2026-08-07T00:00:00+00:00",
+        config={
+            "mode": "v4",
+            "preset": "medium",
+            "candidate_base_url": "https://api.example.com/v1",
+            "candidate_claimed_model": "gpt-5.6-sol",
+            "candidate_request_model": "custom-sol-alias",
+            "candidate_api_key_hint": "sk-tes...secret",
+            "retention_enabled": True,
+        },
+    )
+    command = manager._command(job, tmp_path / "report.json")
+    retention_path = Path(command[command.index("--retention-directory") + 1])
+    assert retention_path == RETENTION_ROOT / job.id
+    assert str(retention_path).startswith(str(REPORT_DIR))
+
+    session_dir = retention_path / "session-safe"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "retention_manifest.json").write_text(
+        '{"auth_values_persisted":false}', encoding="utf-8"
+    )
+    (session_dir / "raw_exchange.jsonl").write_text(
+        '{"request":"safe","authorization":"omitted"}\n', encoding="utf-8"
+    )
+    try:
+        archive = build_retention_archive(job.id)
+        try:
+            with zipfile.ZipFile(archive) as retained:
+                names = retained.namelist()
+                assert any(name.endswith("retention_manifest.json") for name in names)
+                contents = "".join(
+                    retained.read(name).decode("utf-8") for name in names
+                )
+                assert "auth_values_persisted" in contents
+                assert "sk-test-complete-secret" not in contents
+        finally:
+            archive.unlink(missing_ok=True)
+    finally:
+        shutil.rmtree(retention_path, ignore_errors=True)
+
+
+def test_raw_retention_omits_auth_headers_and_redacts_key(
+    tmp_path: Path, monkeypatch
+) -> None:
+    key = "sk-test-retention-secret-123456"
+    monkeypatch.setattr("gpt56_vnext.retention.tempfile.gettempdir", lambda: "/not-the-test-root")
+    retention = RawRetention(tmp_path / "retained", "session-safe")
+    retention.write(
+        {
+            "url": "https://api.example.com/v1/responses?token=secret",
+            "response_headers": {
+                "Authorization": f"Bearer {key}",
+                "X-Request-ID": "request-safe",
+            },
+            "request_body_utf8_exact": json.dumps({"api_key": key}),
+            "response_stream_utf8_exact": f"result {key}",
+        }
+    )
+    manifest = retention.finalize()
+    raw = retention.raw_path.read_text(encoding="utf-8")
+    assert manifest["auth_values_persisted"] is False
+    assert key not in raw
+    assert "Authorization" not in raw
+    assert "request-safe" in raw
+    assert "[AUTH_VALUE_OMITTED]" in raw
+
+
+def test_retention_download_is_owner_only_and_not_cacheable() -> None:
+    with (
+        TestClient(app, base_url="https://testserver") as owner_browser,
+        TestClient(app, base_url="https://testserver") as other_browser,
+    ):
+        owner_browser.get("/")
+        other_browser.get("/")
+        owner_id = browser_id_from_token(owner_browser.cookies.get(BROWSER_COOKIE))
+        assert owner_id
+        job = make_job("retention-owner", owner_id)
+        job.config["retention_enabled"] = True
+        manager.jobs[job.id] = job
+        session_dir = RETENTION_ROOT / job.id / "session-safe"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "retention_manifest.json").write_text(
+            '{"auth_values_persisted":false}', encoding="utf-8"
+        )
+        try:
+            own_response = owner_browser.get(
+                f"/api/jobs/{job.id}/retention.zip"
+            )
+            assert own_response.status_code == 200
+            assert own_response.headers["content-type"] == "application/zip"
+            assert own_response.headers["cache-control"] == "no-store"
+            assert zipfile.is_zipfile(io.BytesIO(own_response.content))
+            assert (
+                other_browser.get(f"/api/jobs/{job.id}/retention.zip").status_code
+                == 404
+            )
+        finally:
+            manager.jobs.pop(job.id, None)
+            shutil.rmtree(RETENTION_ROOT / job.id, ignore_errors=True)
 
 
 def make_job(job_id: str, owner_id: str, status: str = "completed") -> Job:

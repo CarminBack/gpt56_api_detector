@@ -49,7 +49,10 @@
         <p>Juice · behavioral fingerprint v3</p>
       </div>
     </div>
-    <div class="service-state"><span class="state-dot"></span>服务在线</div>
+    <div class="service-meta">
+      <span id="app-version" class="version-badge">v—</span>
+      <div class="service-state"><span class="state-dot"></span>服务在线</div>
+    </div>
   </header>
 
   <main id="main" class="workspace">
@@ -104,6 +107,18 @@
           </div>
         </fieldset>
 
+        <details class="advanced-options">
+          <summary>其他选项</summary>
+          <label class="check-option" for="retention-enabled">
+            <input id="retention-enabled" name="retention-enabled" type="checkbox">
+            <span>
+              <strong>保留完整请求与返回</strong>
+              <small>保存请求正文、原始响应流、状态码和时间信息</small>
+            </span>
+          </label>
+          <p class="retention-warning">记录可能包含探针题面、模型完整回复和 32K 历史内容。认证头和 API Key 不会写入，但下载后仍应妥善保管。</p>
+        </details>
+
         <p class="privacy-note">低、中、高档均含正式行为指纹；高档另含 Native 与固定 32K 历史。完整 Key 仅传入当前检测子进程。</p>
         <button id="start-button" class="primary-button" type="submit">
           <svg aria-hidden="true"><use href="#icon-play"/></svg>
@@ -128,6 +143,9 @@
             </a>
             <a id="json-report" class="icon-button report-download is-disabled" href="#" title="下载 JSON 报告" aria-label="下载 JSON 报告">
               <svg aria-hidden="true"><use href="#icon-download"/></svg>
+            </a>
+            <a id="retention-download" class="secondary-button is-disabled" href="#" title="下载完整请求与返回记录" aria-label="下载完整请求与返回记录">
+              <svg aria-hidden="true"><use href="#icon-download"/></svg>请求记录
             </a>
           </div>
         </div>

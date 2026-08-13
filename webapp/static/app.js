@@ -88,6 +88,7 @@ async function loadModels(kind, button) {
 function jobPayload() {
   const payload = {
     preset: state.preset,
+    retention_enabled: el("retention-enabled").checked,
     candidate: {
       base_url: el("candidate-url").value.trim(),
       claimed_model: el("candidate-claimed-model").value,
@@ -175,9 +176,21 @@ function renderJob(job) {
 function setReportLinks(job) {
   const html = el("html-report");
   const json = el("json-report");
+  const retention = el("retention-download");
   [html, json].forEach((item) => item.classList.toggle("is-disabled", !job.has_report));
   html.href = job.has_report ? `/api/jobs/${job.id}/report.html` : "#";
   json.href = job.has_report ? `/api/jobs/${job.id}/report.json` : "#";
+  retention.classList.toggle("is-disabled", !job.has_retention);
+  retention.href = job.has_retention ? `/api/jobs/${job.id}/retention.zip` : "#";
+}
+
+async function loadVersion() {
+  try {
+    const result = await api("/api/version");
+    el("app-version").textContent = `v${result.version}`;
+  } catch {
+    el("app-version").textContent = "v—";
+  }
 }
 
 function updateElapsed(finishedAt = null) {
@@ -377,4 +390,5 @@ el("job-form").addEventListener("submit", startJob);
 el("stop-button").addEventListener("click", stopJob);
 el("refresh-history").addEventListener("click", refreshHistory);
 setPreset("low");
+loadVersion();
 refreshHistory();

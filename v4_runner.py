@@ -22,6 +22,7 @@ def main() -> int:
     parser.add_argument("--preset", choices=("low", "medium", "high"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--retention-directory", type=Path)
     args = parser.parse_args()
 
     api_key = os.environ.pop("CANDIDATE_API_KEY", "")
@@ -36,6 +37,8 @@ def main() -> int:
         api_key=api_key,
         config=config,
         directory=args.run_dir,
+        retention_enabled=args.retention_directory is not None,
+        retention_directory=args.retention_directory,
     )
     api_key = ""
     stop_requested = threading.Event()
