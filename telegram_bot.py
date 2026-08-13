@@ -241,7 +241,7 @@ class DetectorClient:
             response = await self.client.post(
                 "/api/jobs",
                 json={
-                    "preset": "low",
+                    "preset": "medium",
                     "candidate": {
                         "base_url": request.base_url,
                         "model": model,

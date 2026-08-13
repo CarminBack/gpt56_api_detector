@@ -315,7 +315,7 @@ Native Codex 模式复现项目已审计的本地抓包轮廓，包括 Responses
 - 网站：`https://check.mewinyou.shop`
 - 网站提供官方低档、中档、高档三种单次检测。
 - 每个浏览器只能同时运行一个任务，不同浏览器可并行运行。
-- Telegram Bot 默认依次检测 `gpt-5.6-sol` 与 `gpt-5.6-terra` 的低档。
+- Telegram Bot 默认依次检测 `gpt-5.6-sol` 与 `gpt-5.6-terra` 的中档。
 - API Key 仅通过任务子进程环境传入；命令行、日志和报告只保留脱敏提示。
 
 本地运行公网服务外壳：

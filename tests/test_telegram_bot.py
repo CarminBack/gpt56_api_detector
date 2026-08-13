@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -91,11 +92,13 @@ def test_model_result_does_not_include_raw_report_details() -> None:
 
 def test_detector_client_polls_and_fetches_report() -> None:
     calls: list[str] = []
+    submitted_jobs: list[dict] = []
     statuses = iter(("running", "completed"))
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
         if request.method == "POST":
+            submitted_jobs.append(json.loads(request.read()))
             return httpx.Response(202, json={"id": "job-1"})
         if request.url.path == "/api/jobs/job-1":
             return httpx.Response(200, json={"status": next(statuses)})
@@ -113,4 +116,6 @@ def test_detector_client_polls_and_fetches_report() -> None:
 
     report = asyncio.run(scenario())
     assert report["combined_summary"]["passed_cn"] == "通过"
+    assert submitted_jobs[0]["preset"] == "medium"
+    assert submitted_jobs[0]["candidate"]["model"] == "gpt-5.6-sol"
     assert calls == ["/api/jobs", "/api/jobs/job-1", "/api/jobs/job-1", "/api/jobs/job-1/report.json"]
