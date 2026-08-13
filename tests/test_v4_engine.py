@@ -5,7 +5,7 @@ from gpt56_vnext.detector import DetectorSession
 from gpt56_vnext.presets import get_preset
 
 
-def test_v4_low_preset_builds_schema3_report(tmp_path: Path) -> None:
+def test_v4_low_preset_builds_schema4_report(tmp_path: Path) -> None:
     session = DetectorSession(
         base_url="https://api.example.com/v1",
         model="gpt-5.6-sol",
@@ -33,11 +33,13 @@ def test_v4_low_preset_builds_schema3_report(tmp_path: Path) -> None:
     finally:
         session.close()
 
-    assert report["schema_version"] == 3
+    assert report["schema_version"] == 4
     assert report["preset"] == "low"
     assert report["official"] is True
-    assert report["outcome_code"] == "juice_pass_fingerprint_unclear"
-    assert report["network_summary"]["logical_tasks"] == 14
+    assert report["outcome_code"] == "juice_pass_fingerprint_strong"
+    assert report["network_summary"]["logical_tasks"] == 19
+    assert report["claimed_model"] == "gpt-5.6-sol"
+    assert report["request_model"] == "gpt-5.6-sol"
     assert report["network_summary"]["final_errors"] == 0
     assert report["auth_values_persisted"] is False
 

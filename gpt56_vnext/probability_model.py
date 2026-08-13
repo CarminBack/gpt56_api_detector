@@ -16,18 +16,6 @@ SCORING_VERSION = "trusted-fingerprint-v3"
 MODELS = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 SMOOTHING = 0.5
 COMPLETION_RATIO = 0.90
-FORMAL_THRESHOLDS = {
-    "medium": {
-        "gpt-5.6-sol": 0.70,
-        "gpt-5.6-terra": 0.75,
-        "gpt-5.6-luna": 0.90,
-    },
-    "high": {
-        "gpt-5.6-sol": 0.95,
-        "gpt-5.6-terra": 0.90,
-        "gpt-5.6-luna": 0.90,
-    },
-}
 
 
 def _safe_log(value: float) -> float:
@@ -194,8 +182,9 @@ def _family_scores(cells: dict[str, dict[str, Any]]) -> tuple[dict[str, float], 
     return total_scores, details
 
 
-def _runtime_signature(runtime_spec: dict[str, Any]) -> str:
+def runtime_signature(runtime_spec: dict[str, Any]) -> str:
     canonical = {
+        "name": str(runtime_spec.get("name") or "runtime"),
         "cells": {
             str(key): int(value)
             for key, value in sorted((runtime_spec.get("cells") or {}).items())
@@ -243,13 +232,6 @@ def _contract_failures(
     return sorted(failures)
 
 
-def _decision_level(runtime_name: str) -> str | None:
-    parts = runtime_name.split(":")
-    if len(parts) >= 2 and parts[0] in {"single", "continuous"} and parts[1] in FORMAL_THRESHOLDS:
-        return parts[1]
-    return None
-
-
 def _validate_raw_baseline(raw: dict[str, Any]) -> None:
     probes = raw.get("probes")
     if not isinstance(probes, dict) or not probes:
@@ -267,7 +249,6 @@ def _validate_raw_baseline(raw: dict[str, Any]) -> None:
 def fit_baseline(
     raw: dict[str, Any],
     *,
-    runtime_specs: list[dict[str, Any]],
     probe_metadata: dict[str, Any] | None = None,
     baseline_id: str | None = None,
 ) -> dict[str, Any]:
@@ -299,28 +280,6 @@ def fit_baseline(
             "minimum_windows": min(value["windows"] for value in model_summary.values()),
         }
 
-    runtime_contracts: dict[str, Any] = {}
-    for runtime_spec in runtime_specs:
-        signature = _runtime_signature(runtime_spec)
-        required = {
-            str(key): int(value)
-            for key, value in (runtime_spec.get("cells") or {}).items()
-        }
-        missing = sorted(set(required) - set(raw_cells))
-        contract_failures = _contract_failures(runtime_spec, probe_metadata)
-        runtime_name = str(runtime_spec.get("name") or "runtime")
-        level = _decision_level(runtime_name)
-        runtime_contracts[signature] = {
-            "runtime_name": runtime_name,
-            "runtime_signature": signature,
-            "decision_level": level,
-            "required_samples": required,
-            "exact_contracts": deepcopy(runtime_spec.get("contracts") or {}),
-            "missing_cells": missing,
-            "contract_failures": contract_failures,
-            "formal_eligible": bool(level and not missing and not contract_failures),
-        }
-
     reference_ready = all(
         cells_quality[key]["models"][model]["total"] > 0
         for key in cells_quality
@@ -337,8 +296,6 @@ def fit_baseline(
         "raw_counts": deepcopy(raw.get("probes") or {}),
         "cells_quality": cells_quality,
         "cells": fitted_cells,
-        "runtime_contracts": runtime_contracts,
-        "formal_eligible": any(value["formal_eligible"] for value in runtime_contracts.values()),
         "reference_ready": reference_ready,
         "weight_formula": "0 if S<=0 or S<=D else min(1,(S-D)/S)",
         "match_transform": "softmax_T_1",
@@ -380,11 +337,11 @@ class ProbabilityModel:
         rows: Iterable[dict[str, Any]],
         *,
         runtime_spec: dict[str, Any],
-        claimed_model: str,
+        claimed_model: str | None = None,
+        decision_policy: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         del claimed_model
-        signature = _runtime_signature(runtime_spec)
-        runtime_contract = (self.artifact.get("runtime_contracts") or {}).get(signature)
+        signature = runtime_signature(runtime_spec)
         planned = {
             str(key): int(value)
             for key, value in (runtime_spec.get("cells") or {}).items()
@@ -442,10 +399,14 @@ class ProbabilityModel:
         ordered = sorted(MODELS, key=lambda model: matches[model], reverse=True)
         contract_failures = _contract_failures(runtime_spec, self.artifact.get("probe_metadata") or {})
         reasons: list[str] = []
-        if runtime_contract is None:
-            reasons.append("no_exact_runtime_contract")
-        elif not runtime_contract.get("formal_eligible"):
-            reasons.append("runtime_reference_only")
+        policy_valid = bool(
+            decision_policy
+            and decision_policy.get("runtime_signature") == signature
+            and decision_policy.get("required_samples") == planned
+            and decision_policy.get("exact_contracts") == (runtime_spec.get("contracts") or {})
+        )
+        if not policy_valid:
+            reasons.append("no_exact_runtime_policy")
         if contract_failures:
             reasons.append("runtime_contract_mismatch")
         if missing_baseline_cells:
@@ -455,11 +416,10 @@ class ProbabilityModel:
         if active_families == 0:
             reasons.append("no_weighted_fingerprint_family")
 
-        decision_level = runtime_contract.get("decision_level") if runtime_contract else None
-        thresholds = FORMAL_THRESHOLDS.get(str(decision_level), {})
+        decision_level = decision_policy.get("decision_level") if policy_valid else None
+        thresholds = deepcopy(decision_policy.get("thresholds") or {}) if policy_valid else {}
         official_eligible = bool(
-            runtime_contract
-            and runtime_contract.get("formal_eligible")
+            policy_valid
             and not contract_failures
             and not missing_baseline_cells
             and not incomplete_cells
@@ -515,7 +475,6 @@ class ProbabilityModel:
 
 __all__ = [
     "COMPLETION_RATIO",
-    "FORMAL_THRESHOLDS",
     "MODELS",
     "ProbabilityModel",
     "SCHEMA_VERSION",
@@ -525,5 +484,6 @@ __all__ = [
     "fit_cell",
     "js_divergence",
     "load_baseline",
+    "runtime_signature",
     "verify_baseline",
 ]

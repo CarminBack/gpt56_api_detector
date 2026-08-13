@@ -117,5 +117,6 @@ def test_detector_client_polls_and_fetches_report() -> None:
     report = asyncio.run(scenario())
     assert report["combined_summary"]["passed_cn"] == "通过"
     assert submitted_jobs[0]["preset"] == "medium"
-    assert submitted_jobs[0]["candidate"]["model"] == "gpt-5.6-sol"
+    assert submitted_jobs[0]["candidate"]["claimed_model"] == "gpt-5.6-sol"
+    assert submitted_jobs[0]["candidate"]["request_model"] == "gpt-5.6-sol"
     assert calls == ["/api/jobs", "/api/jobs/job-1", "/api/jobs/job-1", "/api/jobs/job-1/report.json"]

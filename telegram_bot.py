@@ -244,7 +244,8 @@ class DetectorClient:
                     "preset": "medium",
                     "candidate": {
                         "base_url": request.base_url,
-                        "model": model,
+                        "claimed_model": model,
+                        "request_model": model,
                         "api_key": request.api_key,
                     },
                 },

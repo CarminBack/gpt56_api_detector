@@ -417,6 +417,23 @@ select:disabled {
   font-size: 12px;
 }
 
+.site-notice {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 4px 24px 28px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.site-notice p {
+  margin: 2px 0;
+}
+
+.site-notice a {
+  color: var(--focus);
+}
+
 .primary-button,
 .secondary-button,
 .icon-button {

@@ -113,7 +113,8 @@ def test_different_browsers_can_start_jobs_concurrently(monkeypatch) -> None:
     payload = JobInput(
         candidate={
             "base_url": "https://api.example.com/v1",
-            "model": "gpt-5.6-sol",
+            "claimed_model": "gpt-5.6-sol",
+            "request_model": "gpt-5.6-sol",
             "api_key": "sk-test",
         }
     )
@@ -142,10 +143,14 @@ def test_different_browsers_can_start_jobs_concurrently(monkeypatch) -> None:
 
 def test_dashboard_has_visible_model_selectors() -> None:
     dashboard = client.get("/")
+    assert 'id="candidate-claimed-model"' in dashboard.text
+    assert 'id="candidate-request-model"' in dashboard.text
     assert 'id="candidate-model-select"' in dashboard.text
     assert 'data-preset="low"' in dashboard.text
     assert 'data-preset="medium"' in dashboard.text
     assert 'data-preset="high"' in dashboard.text
+    assert "Required Notice: Copyright 2026 chen-006 and contributors" in dashboard.text
+    assert "https://github.com/chen-006/gpt56_api_detector" in dashboard.text
     assert "<datalist" not in dashboard.text
 
 
@@ -188,12 +193,15 @@ def test_detector_command_contains_no_api_keys(tmp_path) -> None:
             "mode": "v4",
             "preset": "low",
             "candidate_base_url": "https://api.example.com/v1",
-            "candidate_model": "gpt-5.6-sol",
+            "candidate_claimed_model": "gpt-5.6-sol",
+            "candidate_request_model": "custom-sol-alias",
             "candidate_api_key_hint": "sk-tes...secret",
         },
     )
     command = manager._command(job, tmp_path / "report.json")
     assert command[command.index("--preset") + 1] == "low"
+    assert command[command.index("--claimed-model") + 1] == "gpt-5.6-sol"
+    assert command[command.index("--request-model") + 1] == "custom-sol-alias"
     assert command[1].endswith("v4_runner.py")
     assert not any(part.startswith("sk-") for part in command)
 
@@ -209,7 +217,8 @@ def test_job_process_completes_when_report_exists(monkeypatch) -> None:
             "mode": "v4",
             "preset": "low",
             "candidate_base_url": "https://api.example.com/v1",
-            "candidate_model": "gpt-5.6-sol",
+            "candidate_claimed_model": "gpt-5.6-sol",
+            "candidate_request_model": "gpt-5.6-sol",
             "candidate_api_key_hint": "sk-tes...secret",
         },
     )
@@ -264,7 +273,8 @@ def make_job(job_id: str, owner_id: str, status: str = "completed") -> Job:
             "mode": "v4",
             "preset": "low",
             "candidate_base_url": "https://api.example.com/v1",
-            "candidate_model": "gpt-5.6-sol",
+            "candidate_claimed_model": "gpt-5.6-sol",
+            "candidate_request_model": "gpt-5.6-sol",
             "candidate_api_key_hint": "sk-exa...secret",
         },
     )

@@ -76,13 +76,20 @@
           <label for="candidate-url">Base URL</label>
           <input id="candidate-url" name="candidate-url" type="url" inputmode="url" autocomplete="url" placeholder="https://api.example.com/v1" required>
 
+          <label for="candidate-claimed-model">申报模型</label>
+          <select id="candidate-claimed-model" name="candidate-claimed-model" required>
+            <option value="gpt-5.6-sol">gpt-5.6-sol</option>
+            <option value="gpt-5.6-terra">gpt-5.6-terra</option>
+            <option value="gpt-5.6-luna">gpt-5.6-luna</option>
+          </select>
+
           <div class="label-row">
-            <label for="candidate-model">模型名</label>
+            <label for="candidate-request-model">实际请求模型</label>
             <button class="text-button" type="button" data-load-models="candidate">
               <svg aria-hidden="true"><use href="#icon-refresh"/></svg>读取模型
             </button>
           </div>
-          <input id="candidate-model" name="candidate-model" autocomplete="off" value="gpt-5.6-sol" required>
+          <input id="candidate-request-model" name="candidate-request-model" autocomplete="off" value="gpt-5.6-sol" required>
           <label class="model-select-label" for="candidate-model-select">模型列表</label>
           <select id="candidate-model-select" class="model-select" data-model-select="candidate" disabled>
             <option value="">读取后可选择</option>
@@ -97,7 +104,7 @@
           </div>
         </fieldset>
 
-        <p class="privacy-note">低档用于快速检查；中档加入正式行为指纹；高档含 Native 与固定 32K 历史。完整 Key 仅传入当前检测子进程。</p>
+        <p class="privacy-note">低、中、高档均含正式行为指纹；高档另含 Native 与固定 32K 历史。完整 Key 仅传入当前检测子进程。</p>
         <button id="start-button" class="primary-button" type="submit">
           <svg aria-hidden="true"><use href="#icon-play"/></svg>
           开始检测
@@ -171,6 +178,11 @@
       </section>
     </div>
   </main>
+
+  <footer class="site-notice">
+    <p>免费、公益、非商业检测站。修改版不代表原作者运营或背书。</p>
+    <p>Required Notice: Copyright 2026 chen-006 and contributors. Original project: <a href="https://github.com/chen-006/gpt56_api_detector" target="_blank" rel="noopener">chen-006/gpt56_api_detector</a></p>
+  </footer>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/assets/app.js" defer></script>

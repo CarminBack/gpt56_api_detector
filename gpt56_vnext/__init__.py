@@ -1,4 +1,4 @@
-"""GPT-5.6 detector v4.1 runtime."""
+"""GPT-5.6 detector v4.1.1 runtime."""
 
 from .juice import JuiceSession, classify_juice_answer
 from .probability_model import ProbabilityModel, fit_baseline, js_divergence

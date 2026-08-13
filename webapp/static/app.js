@@ -74,7 +74,7 @@ async function loadModels(kind, button) {
       select.append(option);
     });
     select.disabled = result.models.length === 0;
-    const currentModel = el(`${kind}-model`).value.trim();
+    const currentModel = el(`${kind}-request-model`).value.trim();
     select.value = result.models.includes(currentModel) ? currentModel : "";
     if (!select.disabled) select.focus();
     showToast(`读取到 ${result.models.length} 个模型`);
@@ -90,7 +90,8 @@ function jobPayload() {
     preset: state.preset,
     candidate: {
       base_url: el("candidate-url").value.trim(),
-      model: el("candidate-model").value.trim(),
+      claimed_model: el("candidate-claimed-model").value,
+      request_model: el("candidate-request-model").value.trim(),
       api_key: el("candidate-key").value,
     },
   };
@@ -269,7 +270,11 @@ function renderHistory(jobs) {
     const title = document.createElement("span");
     title.className = "history-title-row";
     const model = document.createElement("strong");
-    model.textContent = job.config.candidate_model || "未知模型";
+    const claimedModel = job.config.candidate_claimed_model || job.config.candidate_model;
+    const requestModel = job.config.candidate_request_model || claimedModel;
+    model.textContent = requestModel && requestModel !== claimedModel
+      ? `${claimedModel} → ${requestModel}`
+      : (claimedModel || "未知模型");
     const mode = document.createElement("span");
     mode.className = "history-mode";
     mode.textContent = {low: "低档", medium: "中档", high: "高档"}[job.config.preset] || "旧版";
@@ -359,8 +364,13 @@ document.querySelectorAll("[data-load-models]").forEach((button) => {
 
 document.querySelectorAll("[data-model-select]").forEach((select) => {
   select.addEventListener("change", () => {
-    if (select.value) el(`${select.dataset.modelSelect}-model`).value = select.value;
+    if (select.value) el(`${select.dataset.modelSelect}-request-model`).value = select.value;
   });
+});
+
+el("candidate-claimed-model").addEventListener("change", (event) => {
+  el("candidate-request-model").value = event.target.value;
+  el("candidate-model-select").value = "";
 });
 
 el("job-form").addEventListener("submit", startJob);

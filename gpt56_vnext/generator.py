@@ -163,6 +163,15 @@ class ProbeGeneratorSession:
     def stop(self) -> dict[str, Any]:
         previous = self.store.session(self.session_id) or {}
         previous_status = str(previous.get("status") or "unknown")
+        if previous_status not in {"running", "stopping", "interrupted"}:
+            return {
+                "accepted": False,
+                "session_id": self.session_id,
+                "previous_status": previous_status,
+                "current_status": previous_status,
+                "stop_requested_at": previous.get("stop_requested_at"),
+                "active_requests_cancelled": 0,
+            }
         self.stop_event.set()
         requested_at = self.store.request_stop(self.session_id)
         self.store.update_session_status(self.session_id, "stopping")
@@ -486,7 +495,6 @@ class ProbeGeneratorSession:
             }
         baseline = fit_baseline(
             raw,
-            runtime_specs=[runtime_spec],
             probe_metadata=metadata,
             baseline_id=f"custom-{self.plan.probe_id}",
         )
@@ -520,8 +528,7 @@ class ProbeGeneratorSession:
             "normalizer": self.plan.normalizer,
             "runtime_requests": self.plan.runtime_samples,
             "time_windows": self.plan.temporal_windows,
-            "formal_eligible": bool(baseline.get("formal_eligible")),
-            "reference_ready": bool(baseline.get("reference_ready", baseline.get("formal_eligible"))),
+            "reference_ready": bool(baseline.get("reference_ready")),
             "baseline_artifact": baseline,
             "auth_values_persisted": False,
         }

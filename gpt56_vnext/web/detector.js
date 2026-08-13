@@ -155,9 +155,10 @@ async function updateEstimate() {
   try {
     const estimate=await post("/api/detector/estimate",{config:state.config});
     const items=state.mode==="single"
-      ? [["请求数",estimate.total_requests],["32K 请求",estimate.fixed_32k_requests],["长上下文词量",estimate.approximate_fixed_32k_input_tokens?.toLocaleString("zh-CN")]]
-      : [["格式格",estimate.profiles],["调度","随机间隔 · 独立概率"],["档位",estimate.official?"官方":"自定义参考"]];
+      ? [["请求数",estimate.total_requests],["32K 请求",estimate.fixed_32k_requests],["普通短请求输入",Number(estimate.short_request_input_tokens||0).toLocaleString("zh-CN")],["原生 Codex 基础输入",Number(estimate.native_base_input_tokens||0).toLocaleString("zh-CN")],["固定 32K 历史输入",Number(estimate.fixed_32k_input_tokens||0).toLocaleString("zh-CN")],["估算输入合计",Number(estimate.approximate_input_tokens_total||0).toLocaleString("zh-CN")]]
+      : [["每周期期望请求",estimate.expected_requests_per_cycle],["每周期期望 32K 请求",estimate.expected_fixed_32k_requests_per_cycle],["每周期估算输入",Number(estimate.expected_input_tokens_per_cycle||0).toLocaleString("zh-CN")]];
     $("estimate").innerHTML=items.map(([key,value])=>`<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value??"—")}</dd></div>`).join("");
+    $("estimate").insertAdjacentHTML("beforeend",`<div><dt>估算说明</dt><dd><small>${escapeHtml(estimate.estimate_disclaimer_cn||"")}</small></dd></div>`);
     const costly=state.mode==="single"&&estimate.fixed_32k_requests>0;
     $("high-cost").classList.toggle("hidden",!costly); if(costly) $("high-cost").textContent=`当前含 ${estimate.fixed_32k_requests} 条固定 32K 请求。`;
   } catch(error) { console.warn(error); }
@@ -174,15 +175,16 @@ function bindCollection(id,collection,value) {
 }
 
 async function startRun() {
-  const baseUrl=normalizeApiBaseUrl($("base-url").value),apiKey=$("api-key").value,model=$("model").value.trim();
+  const baseUrl=normalizeApiBaseUrl($("base-url").value),apiKey=$("api-key").value,claimedModel=$("claimed-model").value,requestModel=$("request-model").value.trim();
   $("base-url").value=baseUrl;
-  if(!baseUrl||!apiKey||!model){toast("请完整填写 API 地址、模型名和 key");showStep("connect");return;}
+  if(!baseUrl||!apiKey||!claimedModel||!requestModel){toast("请完整填写 API 地址、申报模型、实际请求模型和 key");showStep("connect");return;}
+  if(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(requestModel)){toast("实际请求模型不能包含换行或控制字符");return;}
   const retention=$("retention-enabled").checked,retentionPath=$("retention-path").value.trim();
   if(retention&&!retentionPath){toast("开启留存后必须填写绝对目录");return;}
   if(state.config.request_formats.includes("native_codex")&&!confirm("原生 Codex 请求建议配合系统级 TUN VPN。仅设置浏览器代理可能无法覆盖检测器的 Python 和 Node 子进程。确认继续吗？"))return;
   try {
-    const result=await post("/api/detector/start",{base_url:baseUrl,model,api_key:apiKey,config:state.config,resume_session_id:state.resumeSessionId||null,retention_enabled:retention,retention_directory:retentionPath||null});
-    state.resumeSessionId=""; $("api-key").value=""; $("run-session").textContent=`会话 ${result.session_id}`; showStep("run"); watchStatus();
+    const result=await post("/api/detector/start",{base_url:baseUrl,claimed_model:claimedModel,request_model:requestModel,api_key:apiKey,config:state.config,resume_session_id:state.resumeSessionId||null,retention_enabled:retention,retention_directory:retentionPath||null});
+    state.resumeSessionId=""; $("run-session").textContent=`会话 ${result.session_id}`; showStep("run"); watchStatus();
   } catch(error){toast(friendlyError(error.message));}
 }
 
@@ -201,6 +203,7 @@ async function pollStatus() {
 function renderRunStatus(status) {
   $("raw-status").textContent=JSON.stringify(status,null,2);
   if(status.session_id) $("run-session").textContent=`会话 ${status.session_id}`;
+  $("run-models").textContent=`申报 ${modelLabel(status.claimed_model)} · 实际请求 ${status.request_model||status.claimed_model||"—"}`;
   const statusLabel=({running:"运行中",complete:"已完成",error:"运行错误",stopping:"正在停止",stopped:"已停止",interrupted:"进程中断，可输入 key 恢复"})[status.status]||status.status;
   $("run-status").textContent=status.error?`${statusLabel}：${friendlyError(status.error)}`:statusLabel;
   $("run-status").className=`status-dot ${status.status}`; $("run-updated").textContent=status.updated_at||"—";
@@ -220,21 +223,20 @@ function renderReport(report) {
   $("report-empty").classList.add("hidden"); $("report-content").classList.remove("hidden");
   $("verdict-title").textContent=report.title_cn||report.overall_verdict||"未形成正式结论";
   $("verdict-subtitle").textContent=report.subtitle_cn||report.quality_note||(report.common_causes?.length?`常见原因：${report.common_causes.join("；")}`:"");
-  const alert=report.outcome_code==="possible_non_gpt"||String(report.outcome_code||"").includes("juice_mismatch");
+  const alert=report.outcome_code==="possible_non_gpt"||String(report.outcome_code||"").includes("juice_mismatch")||report.fingerprint_claim_mismatch===true;
   $("verdict-band").classList.toggle("alert",alert); $("verdict-band").classList.toggle("warning",String(report.outcome_code||"").includes("insufficient")||String(report.outcome_code||"").includes("unclear"));
   $("report-custom").classList.toggle("hidden",!report.custom_preset);
+  $("report-models").textContent=`申报模型：${modelLabel(report.claimed_model)}；实际请求模型：${report.request_model||report.claimed_model||"—"}${report.fingerprint_claim_mismatch?`；行为指纹强烈指向 ${modelLabel(report.fingerprint_model)}，与申报不一致。`:""}`;
   if(report.custom_preset) $("report-custom").querySelector("span").textContent=`修改项目：${(report.custom_changes||[]).join("、")||"自定义探针"}。匹配度只能用于参考，不能据此判定是否通过。`;
   const fingerprint=report.fingerprint_summary||{},details=report.fingerprint_details||[];
   const reasons=fingerprint.fingerprint_unclear_reasons_cn||[];
   const reasonCodes=fingerprint.fingerprint_unclear_reasons||[];
-  const lowWithoutFingerprint=reasonCodes.includes("builtin_fingerprint_not_enabled")&&report.preset==="low";
   const fingerprintState=report.fingerprint_verdict_state==="strong_match"?`强烈指向 ${modelLabel(report.fingerprint_model)}`:"证据不明确";
   $("fingerprint-status").textContent=fingerprintState;
   $("fingerprint-status").classList.toggle("strong",report.fingerprint_verdict_state==="strong_match");
-  $("fingerprint-bars").innerHTML=lowWithoutFingerprint
-    ? '<div class="report-item"><strong>低档不运行行为指纹探针</strong><p>低档只检查 Juice、32/48 输出完整性与显式覆盖，因此这里固定为“证据不明确”，不代表线路或模型异常。</p></div>'
-    : details.map(item=>{const threshold=item.threshold==null?"当前模式仅参考":`强指向线 >${(item.threshold*100).toFixed(0)}%`;return `<div class="probability-row"><strong>${escapeHtml(item.label_cn)}</strong><div class="bar"><span style="width:${Math.max(0,Math.min(100,item.match*100))}%"></span></div><span class="probability-value">${(item.match*100).toFixed(3)}%<small>${threshold}</small></span></div>`;}).join("")||'<div class="report-item">当前没有取得可比较的行为指纹样本。</div>';
-  $("fingerprint-reference").innerHTML=`<p>本地 Plus 账号池中档纯 Sol 正式完整测试：48次中45次的 Sol 匹配度高于70%，48次均由 Sol 排名第一。</p><p>高档纯 Sol 测试：13/13 高于95%，删除二次权重后的离线重放范围98.866%至99.476%。中档映射测试：Luna 18/18 高于90%，Terra 17/17 高于75%。</p><p>这些数字只代表对应账号池和测试时间；官方风控、限流或临时路由可能改变结果。</p>${reasons.length?`<p><strong>本次证据不明确原因：</strong>${reasons.map(escapeHtml).join("；")}</p>`:""}`;
+  $("fingerprint-bars").innerHTML=details.map(item=>{const threshold=item.threshold==null?"当前模式仅参考":`强指向线 >${(item.threshold*100).toFixed(0)}%`;return `<div class="probability-row"><strong>${escapeHtml(item.label_cn)}</strong><div class="bar"><span style="width:${Math.max(0,Math.min(100,item.match*100))}%"></span></div><span class="probability-value">${(item.match*100).toFixed(3)}%<small>${threshold}</small></span></div>`;}).join("")||'<div class="report-item">当前没有取得可比较的行为指纹样本。</div>';
+  const referenceRows=[["低","Sol","91.297%","54.645%",">54%"],["低","Terra","92.842%","58.805%",">58%"],["低","Luna","98.406%","77.505%",">77%"],["中","Sol","93.658%","82.995%",">82%"],["中","Terra","94.532%","84.835%",">84%"],["中","Luna","99.452%","97.135%",">97%"],["高","Sol","99.214%","98.645%",">98%"],["高","Terra","98.529%","97.505%",">97%"],["高","Luna","99.877%","99.365%",">99%"]];
+  $("fingerprint-reference").innerHTML=`<p>指纹匹配度只表示这批固定答案的分布更像哪一个可信模型，不是真实路由概率，也不是账号有多少比例用了该模型。低档每题3次，波动最大；中档每题10次更稳；高档比较四种请求格式，最稳定。</p><table><thead><tr><th>档位</th><th>真实模型</th><th>历史模拟平均</th><th>约99%高于</th><th>正式线</th></tr></thead><tbody>${referenceRows.map(row=>`<tr>${row.map(value=>`<td>${value}</td>`).join("")}</tr>`).join("")}</tbody></table><p>阈值来自Stage C中与三个探针相关的3840条记录：低档模拟1000万轮，中档500万轮，高档100万轮。低档仍有约0.07%至0.26%的错误强指向；中高档在这批模拟中为0，但不代表现实中永远零误报。</p><p>独立本地Plus正式池验证了Sol方向；Terra/Luna没有完整同契约独立池。官方风控、限流、临时路由和请求契约变化都可能改变结果。</p>${reasons.length?`<p><strong>本次证据不明确原因：</strong>${reasons.map(escapeHtml).join("；")}</p>`:""}`;
   const efforts=Object.entries(report.juice_summary?.per_effort||{});
   $("juice-result").innerHTML=`<table><thead><tr><th>思考档</th><th>尝试</th><th>有效</th><th>申报型号命中</th><th>型号不一致</th><th>未知输出</th><th>网络错误</th><th>共享值命中</th></tr></thead><tbody>${efforts.map(([effort,value])=>`<tr><td>${escapeHtml(effortLabel(effort))}</td><td>${value.attempted}</td><td>${value.valid_completed}</td><td>${value.current_success}</td><td>${value.mixed}</td><td>${value.unsuccessful}</td><td>${value.network_error}</td><td>${value.shared_current_success}</td></tr>`).join("")}</tbody></table>`;
   const output=report.output_integrity_summary||{},coverage=report.coverage_summary||{};
@@ -256,7 +258,16 @@ function renderReport(report) {
 }
 
 async function init() {
-  state.bootstrap=await fetch("/api/bootstrap").then(response=>response.json()); state.token=state.bootstrap.session_token; applyPreset("low");
+  state.bootstrap=await fetch("/api/bootstrap").then(response=>response.json()); state.token=state.bootstrap.session_token;
+  const current=await fetch("/api/detector/status",{cache:"no-store"}).then(response=>response.json()).catch(()=>({status:"idle"}));
+  let restored=false;
+  if(current.resume_config){
+    try{
+      state.config=clone(current.resume_config);state.mode=state.config.mode;state.preset=state.config.preset||"custom";state.basePreset=state.config.base_preset||(["low","medium","high"].includes(state.preset)?state.preset:"low");state.customProbes=clone(state.config.custom_probes||[]);syncPlan();restored=true;
+    }catch(_error){toast("最近配置损坏，已恢复低档默认参数");}
+  }
+  if(current.resume_config_notice_cn)toast(current.resume_config_notice_cn);
+  if(!restored)applyPreset("low");
   if(state.bootstrap.pending_custom_probe){const pending=customRuntime(clone(state.bootstrap.pending_custom_probe));state.customProbes.push(pending);state.config.custom_probes=clone(state.customProbes);markCustom(`已加入 ${customDocument(pending).probe_identity.name}`);renderProbes();}
   document.querySelectorAll(".step").forEach(node=>node.addEventListener("click",()=>node.dataset.step==="report"?loadReport():showStep(node.dataset.step)));
   document.querySelectorAll("[data-mode]").forEach(node=>node.addEventListener("click",()=>{state.mode=node.dataset.mode;applyPreset(state.basePreset);}));
@@ -270,16 +281,16 @@ async function init() {
   [["min-interval","min_interval_seconds"],["max-interval","max_interval_seconds"],["slots-per-cycle","slots_per_cycle"]].forEach(([id,key])=>$(id).addEventListener("change",event=>{state.config[key]=Number(event.target.value);markCustom("持续调度参数已修改");}));
   $("retention-enabled").addEventListener("change",event=>$("retention-path-row").classList.toggle("hidden",!event.target.checked));
   $("base-url").addEventListener("blur",event=>{event.target.value=normalizeApiBaseUrl(event.target.value);});
+  $("claimed-model").addEventListener("change",event=>{$("request-model").value=event.target.value;});
   $("probe-file").addEventListener("change",async event=>{const file=event.target.files[0];if(!file)return;try{const sourceJson=await file.text(),probe=JSON.parse(sourceJson);await post("/api/probe/verify",{probe_file_json:sourceJson});state.customProbes.push(customRuntime(probe,sourceJson));state.config.custom_probes=clone(state.customProbes);markCustom(`已导入 ${probe.probe_identity.name}`);renderProbes();}catch(error){toast(friendlyError(error.message));}});
-  const current=await fetch("/api/detector/status",{cache:"no-store"}).then(response=>response.json()).catch(()=>({status:"idle"}));
+  if(current.claimed_model) $("claimed-model").value=current.claimed_model;
+  if(current.request_model||current.claimed_model) $("request-model").value=current.request_model||current.claimed_model;
+  if(current.safe_endpoint) $("base-url").value=current.safe_endpoint;
   if(["running","stopping"].includes(current.status)){showStep("run");watchStatus();}
   else if(["complete","stopped"].includes(current.status)&&current.report_available){await loadReport();}
   else if(current.status==="interrupted"){
-    state.resumeSessionId=current.session_id||"";
-    if(current.resume_config){state.config=clone(current.resume_config);state.mode=state.config.mode;state.preset=state.config.preset;state.basePreset=state.config.base_preset||state.preset;state.customProbes=clone(state.config.custom_probes||[]);syncPlan();}
-    if(current.claimed_model) $("model").value=current.claimed_model;
-    if(current.safe_endpoint) $("base-url").value=current.safe_endpoint;
-    toast("检测进程曾中断；输入 API key 后会按原冻结任务和剩余尝试预算恢复");
+    state.resumeSessionId=current.resume_config_valid===false?"":current.session_id||"";
+    if(current.resume_config_valid!==false)toast("检测进程曾中断；输入 API key 后会按原冻结任务和剩余尝试预算恢复");
     showStep("connect");
   }
 }

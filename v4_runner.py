@@ -17,7 +17,8 @@ from gpt56_vnext.presets import get_preset
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--claimed-model", required=True)
+    parser.add_argument("--request-model", required=True)
     parser.add_argument("--preset", choices=("low", "medium", "high"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -30,7 +31,8 @@ def main() -> int:
     config = get_preset("single", args.preset)
     session = DetectorSession(
         base_url=args.base_url,
-        model=args.model,
+        claimed_model=args.claimed_model,
+        request_model=args.request_model,
         api_key=api_key,
         config=config,
         directory=args.run_dir,
@@ -66,7 +68,8 @@ def main() -> int:
 
     progress_thread = threading.Thread(target=show_progress, daemon=True)
     progress_thread.start()
-    print(f"GPT-5.6 detector v4.1.0 {args.preset} 档开始", flush=True)
+    version = (Path(__file__).resolve().parent / "VERSION").read_text(encoding="utf-8").strip()
+    print(f"GPT-5.6 detector v{version} {args.preset} 档开始", flush=True)
     try:
         report = session.run_single()
         args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -124,7 +124,8 @@ def validate_public_https_url(value: str) -> str:
 
 class EndpointInput(BaseModel):
     base_url: str = Field(min_length=8, max_length=500)
-    model: str = Field(min_length=1, max_length=200)
+    claimed_model: Literal["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+    request_model: str = Field(min_length=1, max_length=200)
     api_key: SecretStr
 
 
@@ -246,7 +247,8 @@ class JobManager:
                     "preset": report.get("preset") or metadata.get("preset"),
                     "mode": config.get("detection_mode", "v4"),
                     "candidate_base_url": candidate.get("base_url") or config.get("candidate_base_url"),
-                    "candidate_model": candidate.get("model") or config.get("candidate_model"),
+                    "candidate_claimed_model": candidate.get("claimed_model") or candidate.get("model") or config.get("candidate_claimed_model") or config.get("candidate_model"),
+                    "candidate_request_model": candidate.get("request_model") or candidate.get("model") or config.get("candidate_request_model") or config.get("candidate_model"),
                     "candidate_api_key_hint": metadata.get(
                         "candidate_api_key_hint"
                     ),
@@ -282,7 +284,8 @@ class JobManager:
                 "mode": "v4",
                 "preset": payload.preset,
                 "candidate_base_url": candidate_url,
-                "candidate_model": payload.candidate.model.strip(),
+                "candidate_claimed_model": payload.candidate.claimed_model,
+                "candidate_request_model": payload.candidate.request_model.strip(),
                 "candidate_api_key_hint": mask_api_key(
                     payload.candidate.api_key.get_secret_value()
                 ),
@@ -311,8 +314,10 @@ class JobManager:
             str(PROJECT_DIR / "v4_runner.py"),
             "--base-url",
             config["candidate_base_url"],
-            "--model",
-            config["candidate_model"],
+            "--claimed-model",
+            config["candidate_claimed_model"],
+            "--request-model",
+            config["candidate_request_model"],
             "--preset",
             config["preset"],
             "--output",

@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 import secrets
 import threading
+import unicodedata
 import time
 from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
@@ -33,6 +34,7 @@ from .presets import (
 )
 from .probability_model import COMPLETION_RATIO, ProbabilityModel, load_baseline, verify_baseline
 from .retention import RawRetention, RetentionWriteError
+from .runtime_policy import load_runtime_policy, resolve_decision_policy
 from .store import SQLiteStateStore
 from .transport import RequestCancellationController, StreamingTransport, TransportCancelled, TransportError
 from .utils import canonical_json, deterministic_job_id, normalize_api_base_url, sha256_text, utc_now
@@ -40,6 +42,7 @@ from .verdict import build_overall_verdict
 
 
 DEFAULT_BASELINE = Path(__file__).with_name("baselines") / "trusted_fingerprint_v3.json"
+DEFAULT_RUNTIME_POLICY = Path(__file__).with_name("baselines") / "fingerprint_runtime_policy_v4_1_1.json"
 TRANSIENT_STATUSES = {408, 429, 500, 502, 503, 504}
 CANCELLATION_POLL_SECONDS = 0.10
 CANCELLATION_GRACE_SECONDS = 3.0
@@ -216,20 +219,28 @@ class DetectorSession:
         self,
         *,
         base_url: str,
-        model: str,
+        claimed_model: str | None = None,
+        request_model: str | None = None,
+        model: str | None = None,
         api_key: str,
         config: dict[str, Any],
         directory: str | Path,
         baseline_path: str | Path = DEFAULT_BASELINE,
+        runtime_policy_path: str | Path = DEFAULT_RUNTIME_POLICY,
         retention_enabled: bool = False,
         retention_directory: str | Path | None = None,
     ):
-        if not base_url.strip() or not model.strip() or not api_key:
+        claimed_model = str(claimed_model or model or "").strip()
+        request_model = str(request_model or claimed_model).strip()
+        if not base_url.strip() or not claimed_model or not request_model or not api_key:
             raise ValueError("candidate API address, model, and key are required")
-        if model not in {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}:
+        if claimed_model not in {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}:
             raise ValueError("claimed model must be gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna")
+        if any(unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} for character in request_model):
+            raise ValueError("实际请求模型不能包含换行或控制字符")
         self.base_url = normalize_api_base_url(base_url)
-        self.model = model
+        self.claimed_model = claimed_model
+        self.request_model = request_model
         self.api_key = api_key
         self.config = normalize_config(config)
         self.directory = Path(directory)
@@ -239,9 +250,10 @@ class DetectorSession:
         self.session_id = requested_session or uuid.uuid4().hex
         self.catalog = load_catalog()
         self.baseline = load_baseline(baseline_path)
+        self.runtime_policy = load_runtime_policy(runtime_policy_path, baseline_path=baseline_path)
         full_runtime_spec = probability_runtime_spec(self.config)
         builtin_ids = set(PROBABILITY_PROBES)
-        formal_components: list[tuple[ProbabilityModel, dict[str, Any], str]] = []
+        formal_components: list[tuple[ProbabilityModel, dict[str, Any], str, dict[str, Any] | None]] = []
         reference_custom: list[tuple[ProbabilityModel, dict[str, Any], str]] = []
         if full_runtime_spec is not None:
             builtin_cells = {
@@ -250,11 +262,12 @@ class DetectorSession:
             }
             if builtin_cells:
                 builtin_spec = {
-                    "name": full_runtime_spec["name"] + ":builtin",
+                    "name": full_runtime_spec["name"],
                     "cells": builtin_cells,
                     "contracts": {key: full_runtime_spec["contracts"][key] for key in builtin_cells},
                 }
-                formal_components.append((ProbabilityModel(self.baseline), builtin_spec, "builtin"))
+                decision_policy = resolve_decision_policy(self.runtime_policy, self.config, builtin_spec)
+                formal_components.append((ProbabilityModel(self.baseline), builtin_spec, "builtin", decision_policy))
         for custom in self.config.get("custom_probes", []):
             if custom.get("enabled", True) is False:
                 continue
@@ -288,7 +301,8 @@ class DetectorSession:
             config=self.config,
             config_hash=self.config["config_hash"],
             official=bool(self.config["official"]),
-            claimed_model=self.model,
+            claimed_model=self.claimed_model,
+            request_model=self.request_model,
             safe_endpoint=_safe_endpoint(self.base_url),
         )
         prior = self.store.session(self.session_id)
@@ -319,6 +333,15 @@ class DetectorSession:
     def stop(self) -> dict[str, Any]:
         previous = self.store.session(self.session_id) or {}
         previous_status = str(previous.get("status") or "unknown")
+        if previous_status not in {"running", "stopping", "interrupted"}:
+            return {
+                "accepted": False,
+                "session_id": self.session_id,
+                "previous_status": previous_status,
+                "current_status": previous_status,
+                "stop_requested_at": previous.get("stop_requested_at"),
+                "active_requests_cancelled": 0,
+            }
         self.stop_event.set()
         requested_at = self.store.request_stop(self.session_id)
         cancelled = self.transport.cancel_all()
@@ -455,7 +478,7 @@ class DetectorSession:
 
     def _request(self, job: dict[str, Any]) -> dict[str, Any]:
         result = self.transport.post(
-            model=self.model,
+            model=self.request_model,
             messages=job["messages"],
             effort=job["effort"],
             request_format=job["request_format"],
@@ -666,7 +689,7 @@ class DetectorSession:
             "sanitized_url": _safe_endpoint(self.base_url) + "/responses",
             "request_format": job["request_format"],
             "context_mode": job["context_mode"],
-            "model": self.model,
+            "model": self.request_model,
             "effort": job["effort"],
             "http_status": (result.get("meta") or {}).get("http_status", 200),
             "request_body_utf8_exact": "",
@@ -687,7 +710,7 @@ class DetectorSession:
         }
         probe_id = str(job["probe_id"])
         if probe_id.startswith("juice_") and probe_id != "juice_coverage":
-            row.update(classify_juice_answer(job["effort"], answer, self.model))
+            row.update(classify_juice_answer(job["effort"], answer, self.claimed_model))
         elif probe_id.startswith("output_"):
             row.update(classify_output_integrity(str(job["expected"]), answer))
         elif probe_id == "juice_coverage":
@@ -766,7 +789,7 @@ class DetectorSession:
                 matching = self._rolling_rows(matching, lambda _row: True, needed)
             juice_rows.extend(matching)
         session = JuiceSession(
-            claimed_model=self.model,
+            claimed_model=self.claimed_model,
             selected_efforts=efforts,
             minimum_valid_by_effort=minimum_valid,
         )
@@ -868,8 +891,14 @@ class DetectorSession:
         rows = self.store.latest_results(self.session_id)
         completed_rows = [row for row in rows if row.get("status") in {"ok", "error", "cancelled"}]
         juice_summary = self._juice_summary(completed_rows)
-        output_rows = [row for row in completed_rows if str(row.get("probe_id", "")).startswith("output_") and row.get("status") == "ok"]
+        all_output_rows = [row for row in completed_rows if str(row.get("probe_id", "")).startswith("output_")]
+        if self.config["mode"] == "continuous":
+            output_window = int(self.config["probes"].get("output_integrity", {}).get("window", 1))
+            all_output_rows = self._rolling_rows(all_output_rows, lambda _row: True, output_window)
+        output_rows = [row for row in all_output_rows if row.get("status") == "ok"]
         output_summary = {
+            "window": len(output_rows) if self.config["mode"] == "single" else int(self.config["probes"].get("output_integrity", {}).get("window", 1)),
+            "attempted_in_window": len(all_output_rows),
             "requests": len(output_rows),
             "exact": sum(row.get("exact") is True for row in output_rows),
             "invalid": sum(row.get("classification") == "unsuccessful" for row in output_rows),
@@ -877,8 +906,14 @@ class DetectorSession:
             "failures": [row for row in output_rows if row.get("hard_anomaly")],
             "invalid_rows": [row for row in output_rows if row.get("classification") == "unsuccessful"],
         }
-        coverage_rows = [row for row in completed_rows if row.get("probe_id") == "juice_coverage" and row.get("status") == "ok"]
+        all_coverage_rows = [row for row in completed_rows if row.get("probe_id") == "juice_coverage"]
+        if self.config["mode"] == "continuous":
+            coverage_window = int(self.config["probes"].get("juice_coverage", {}).get("window", 1))
+            all_coverage_rows = self._rolling_rows(all_coverage_rows, lambda _row: True, coverage_window)
+        coverage_rows = [row for row in all_coverage_rows if row.get("status") == "ok"]
         coverage_summary = {
+            "window": len(coverage_rows) if self.config["mode"] == "single" else int(self.config["probes"].get("juice_coverage", {}).get("window", 1)),
+            "attempted_in_window": len(all_coverage_rows),
             "requests": len(coverage_rows),
             "hard_anomaly": any(row.get("hard_anomaly") for row in coverage_rows),
             "classifications": dict(Counter(str(row.get("classification")) for row in coverage_rows)),
@@ -894,9 +929,14 @@ class DetectorSession:
         fingerprint: dict[str, Any] = {}
         window_states: dict[str, Any] = {}
         formal_results: list[dict[str, Any]] = []
-        for formal_model, formal_spec, component_id in self.formal_fingerprint_models:
+        for formal_model, formal_spec, component_id, decision_policy in self.formal_fingerprint_models:
             fingerprint_rows, component_windows = self._fingerprint_rows(completed_rows, formal_spec)
-            result = formal_model.score(fingerprint_rows, runtime_spec=formal_spec, claimed_model=self.model)
+            result = formal_model.score(
+                fingerprint_rows,
+                runtime_spec=formal_spec,
+                claimed_model=self.claimed_model,
+                decision_policy=decision_policy,
+            )
             result["component_id"] = component_id
             result["window_states"] = component_windows
             formal_results.append(result)
@@ -910,7 +950,7 @@ class DetectorSession:
         reference_fingerprint_results: list[dict[str, Any]] = []
         for reference_model, reference_spec, probe_id in self.reference_fingerprint_models:
             reference_rows, reference_windows = self._fingerprint_rows(completed_rows, reference_spec)
-            result = reference_model.score(reference_rows, runtime_spec=reference_spec, claimed_model=self.model)
+            result = reference_model.score(reference_rows, runtime_spec=reference_spec, claimed_model=self.claimed_model)
             result.update({
                 "probe_id": probe_id,
                 "reference_only": True,
@@ -935,7 +975,7 @@ class DetectorSession:
                 "fingerprint_match": {},
                 "fingerprint_thresholds": {},
                 "fingerprint_official_eligible": False,
-                "fingerprint_unclear_reasons": ["builtin_fingerprint_not_enabled"],
+                "fingerprint_unclear_reasons": ["no_probability_probe_selected"],
                 "cell_details": {},
                 "family_contributions": {},
                 "window_states": {},
@@ -951,7 +991,7 @@ class DetectorSession:
             official=bool(self.config["official"]),
             custom_changes=changes,
             session_id=self.session_id,
-            claimed_model=self.model,
+            claimed_model=self.claimed_model,
         )
         progress = self.store.progress(self.session_id)
         attempt_details = self.store.attempt_details(self.session_id)
@@ -988,7 +1028,7 @@ class DetectorSession:
             build_hash.update((Path(__file__).with_name(name)).read_bytes())
         session = self.store.session(self.session_id) or {}
         report = {
-            "schema_version": 3,
+            "schema_version": 4,
             "scoring_version": self.baseline["scoring_version"],
             "session_id": self.session_id,
             "mode": self.config["mode"],
@@ -1001,7 +1041,13 @@ class DetectorSession:
             "build_hash": build_hash.hexdigest(),
             "started_at": session.get("created_at"),
             "updated_at": utc_now(),
-            "candidate_configuration_without_key": {"base_url": _safe_endpoint(self.base_url), "model": self.model},
+            "claimed_model": self.claimed_model,
+            "request_model": self.request_model,
+            "candidate_configuration_without_key": {
+                "base_url": _safe_endpoint(self.base_url),
+                "claimed_model": self.claimed_model,
+                "request_model": self.request_model,
+            },
             "request_profiles": selected_profiles(self.config),
             **verdict,
             "juice_summary": juice_summary,

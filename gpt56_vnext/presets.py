@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import hashlib
+import math
 from typing import Any
 
 from .generator import probe_document
@@ -20,29 +21,29 @@ SINGLE_PRESETS: dict[str, dict[str, Any]] = {
         "mode": "single", "workers": 8, "retries": 2,
         "request_formats": ["normal"], "context_modes": ["no_history"],
         "probes": {
-            "juice_high": {"enabled": True, "requests": 8, "effort": "high"},
-            "juice_low": {"enabled": True, "requests": 3, "effort": "low"},
+            "juice_high": {"enabled": True, "requests": 5, "effort": "high"},
+            "juice_low": {"enabled": True, "requests": 2, "effort": "low"},
             "output_luna_48": {"enabled": True, "requests": 1},
             "output_terra_32": {"enabled": True, "requests": 1},
             "juice_coverage": {"enabled": True, "requests": 1},
-            "rand_country": {"enabled": False, "requests": 0, "effort": "low"},
-            "rand_bird": {"enabled": False, "requests": 0, "effort": "low"},
-            "b80_letter_count": {"enabled": False, "requests": 0, "effort": "low"},
+            "rand_country": {"enabled": True, "requests": 3, "effort": "low", "window": 3},
+            "rand_bird": {"enabled": True, "requests": 3, "effort": "low", "window": 3},
+            "b80_letter_count": {"enabled": True, "requests": 3, "effort": "low", "window": 3},
         },
     },
     "medium": {
         "mode": "single", "workers": 8, "retries": 2,
         "request_formats": ["normal"], "context_modes": ["no_history"],
         "probes": {
-            "juice_high": {"enabled": True, "requests": 12, "effort": "high"},
-            "juice_low": {"enabled": True, "requests": 6, "effort": "low"},
-            "juice_xhigh": {"enabled": True, "requests": 6, "effort": "xhigh"},
-            "juice_max": {"enabled": True, "requests": 6, "effort": "max"},
+            "juice_high": {"enabled": True, "requests": 6, "effort": "high"},
+            "juice_low": {"enabled": True, "requests": 3, "effort": "low"},
+            "juice_xhigh": {"enabled": True, "requests": 3, "effort": "xhigh"},
+            "juice_max": {"enabled": True, "requests": 3, "effort": "max"},
             "output_luna_48": {"enabled": True, "requests": 1},
             "output_terra_32": {"enabled": True, "requests": 1},
             "juice_coverage": {"enabled": True, "requests": 2},
-            "rand_country": {"enabled": True, "requests": 20, "effort": "low", "window": 20},
-            "rand_bird": {"enabled": False, "requests": 0, "effort": "low", "window": 10},
+            "rand_country": {"enabled": True, "requests": 10, "effort": "low", "window": 10},
+            "rand_bird": {"enabled": True, "requests": 10, "effort": "low", "window": 10},
             "b80_letter_count": {"enabled": True, "requests": 10, "effort": "low", "window": 10},
         },
     },
@@ -51,11 +52,11 @@ SINGLE_PRESETS: dict[str, dict[str, Any]] = {
         "request_formats": ["normal", "native_codex"],
         "context_modes": ["no_history", "fixed_32k_history"],
         "probes": {
-            "juice_high": {"enabled": True, "requests": 8, "effort": "high"},
-            "juice_low": {"enabled": True, "requests": 4, "effort": "low"},
-            "juice_medium": {"enabled": True, "requests": 4, "effort": "medium"},
-            "juice_xhigh": {"enabled": True, "requests": 4, "effort": "xhigh"},
-            "juice_max": {"enabled": True, "requests": 4, "effort": "max"},
+            "juice_high": {"enabled": True, "requests": 5, "effort": "high"},
+            "juice_low": {"enabled": True, "requests": 2, "effort": "low"},
+            "juice_medium": {"enabled": True, "requests": 2, "effort": "medium"},
+            "juice_xhigh": {"enabled": True, "requests": 2, "effort": "xhigh"},
+            "juice_max": {"enabled": True, "requests": 2, "effort": "max"},
             "output_luna_48": {"enabled": True, "requests": 1},
             "output_terra_32": {"enabled": True, "requests": 1},
             "juice_coverage": {"enabled": True, "requests": 2},
@@ -75,10 +76,13 @@ CONTINUOUS_PRESETS: dict[str, dict[str, Any]] = {
         "min_interval_seconds": 150, "max_interval_seconds": 210, "slots_per_cycle": 1,
         "request_formats": ["normal"], "context_modes": ["no_history"],
         "probes": {
-            "juice_high": {"enabled": True, "probability_percent": 100, "window": 20, "effort": "high"},
-            "juice_low": {"enabled": True, "probability_percent": 50, "window": 10, "effort": "low"},
-            "output_integrity": {"enabled": True, "probability_percent": 25, "window": 20},
-            "juice_coverage": {"enabled": True, "probability_percent": 25, "window": 20},
+            "juice_high": {"enabled": True, "probability_percent": 100, "window": 10, "effort": "high"},
+            "juice_low": {"enabled": True, "probability_percent": 50, "window": 5, "effort": "low"},
+            "output_integrity": {"enabled": True, "probability_percent": 25, "window": 5},
+            "juice_coverage": {"enabled": True, "probability_percent": 25, "window": 5},
+            "rand_country": {"enabled": True, "probability_percent": 50, "window": 3, "effort": "low"},
+            "rand_bird": {"enabled": True, "probability_percent": 50, "window": 3, "effort": "low"},
+            "b80_letter_count": {"enabled": True, "probability_percent": 50, "window": 3, "effort": "low"},
         },
     },
     "medium": {
@@ -86,14 +90,15 @@ CONTINUOUS_PRESETS: dict[str, dict[str, Any]] = {
         "min_interval_seconds": 240, "max_interval_seconds": 360, "slots_per_cycle": 1,
         "request_formats": ["normal"], "context_modes": ["no_history"],
         "probes": {
-            "juice_high": {"enabled": True, "probability_percent": 100, "window": 20, "effort": "high"},
-            "juice_low": {"enabled": True, "probability_percent": 50, "window": 10, "effort": "low"},
+            "juice_high": {"enabled": True, "probability_percent": 100, "window": 10, "effort": "high"},
+            "juice_low": {"enabled": True, "probability_percent": 50, "window": 5, "effort": "low"},
             "juice_xhigh": {"enabled": True, "probability_percent": 25, "window": 10, "effort": "xhigh"},
             "juice_max": {"enabled": True, "probability_percent": 25, "window": 10, "effort": "max"},
-            "output_integrity": {"enabled": True, "probability_percent": 25, "window": 20},
-            "juice_coverage": {"enabled": True, "probability_percent": 25, "window": 20},
-            "rand_country": {"enabled": True, "probability_percent": 50, "window": 20, "effort": "low"},
-            "b80_letter_count": {"enabled": True, "probability_percent": 50, "window": 20, "effort": "low"},
+            "output_integrity": {"enabled": True, "probability_percent": 25, "window": 5},
+            "juice_coverage": {"enabled": True, "probability_percent": 25, "window": 5},
+            "rand_country": {"enabled": True, "probability_percent": 50, "window": 10, "effort": "low"},
+            "rand_bird": {"enabled": True, "probability_percent": 50, "window": 10, "effort": "low"},
+            "b80_letter_count": {"enabled": True, "probability_percent": 50, "window": 10, "effort": "low"},
         },
     },
     "high": {
@@ -323,6 +328,116 @@ def estimate_single_requests(config: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def _estimate_messages(probe_id: str, probe: dict[str, Any], catalog: dict[str, Any]) -> list[dict[str, str]]:
+    if probe_id.startswith("juice_") and probe_id != "juice_coverage":
+        effort = str(probe.get("effort") or probe_id.removeprefix("juice_") or "high")
+        candidates = [
+            str(catalog["templates"][template_id]["prompt"]).replace("{nonce}", "000000000000")
+            for template_id in (catalog["pools"].get(effort) or [])
+        ]
+        if not candidates:
+            raise ValueError(f"no calibrated Juice templates for {effort}")
+        return [{"role": "user", "content": max(candidates, key=lambda value: len(value.encode('utf-8')))}]
+    if probe_id == "output_luna_48" or probe_id == "output_integrity":
+        return [{"role": "user", "content": "Reply with exactly the two ASCII digits 48. Do not add any other text."}]
+    if probe_id == "output_terra_32":
+        return [{"role": "user", "content": "Reply with exactly the two ASCII digits 32. Do not add any other text."}]
+    if probe_id == "juice_coverage":
+        return [
+            {"role": str(item["role"]), "content": str(item["content"]).replace("{synthetic_value}", "55555")}
+            for item in catalog["coverage_probe"]["messages"]
+        ]
+    behavior = catalog["behavior_probes"].get(probe_id)
+    if behavior:
+        return [{"role": "user", "content": str(behavior["prompt"])}]
+    raise ValueError(f"unknown probe for estimate: {probe_id}")
+
+
+def _message_token_estimate(messages: list[dict[str, str]]) -> int:
+    return sum(math.ceil(len(str(item.get("content") or "").encode("utf-8")) / 3) + 8 for item in messages)
+
+
+def _native_base_token_estimate() -> int:
+    from .transport import RAW_PROFILE
+
+    raw = RAW_PROFILE.read_bytes()
+    separator = b"\r\n\r\n"
+    if separator not in raw:
+        raise ValueError("原生请求模板缺少HTTP正文")
+    return math.ceil(len(raw.split(separator, 1)[1]) / 3)
+
+
+def estimate_plan(config: dict[str, Any]) -> dict[str, Any]:
+    from .catalog import load_catalog
+
+    config = normalize_config(config)
+    catalog = load_catalog()
+    profiles = selected_profiles(config)
+    native_base = _native_base_token_estimate()
+    totals = {
+        "total_requests": 0.0,
+        "fixed_32k_requests": 0.0,
+        "short_request_input_tokens": 0.0,
+        "native_base_input_tokens": 0.0,
+        "fixed_32k_input_tokens": 0.0,
+    }
+
+    def add(messages: list[dict[str, str]], applicable: list[str], multiplier: float) -> None:
+        short = _message_token_estimate(messages)
+        for profile in applicable:
+            totals["total_requests"] += multiplier
+            totals["short_request_input_tokens"] += short * multiplier
+            if profile.startswith("native_codex+"):
+                totals["native_base_input_tokens"] += native_base * multiplier
+            if profile.endswith("fixed_32k_history"):
+                totals["fixed_32k_requests"] += multiplier
+                totals["fixed_32k_input_tokens"] += 33792 * multiplier
+
+    for probe_id, probe in config["probes"].items():
+        if not probe.get("enabled"):
+            continue
+        applicable = list(probe.get("profiles") or profiles)
+        multiplier = (
+            float(probe.get("requests", 0))
+            if config["mode"] == "single"
+            else float(config.get("slots_per_cycle", 1)) * float(probe.get("probability_percent", 0)) / 100.0
+        )
+        add(_estimate_messages(probe_id, probe, catalog), applicable, multiplier)
+    for custom in config.get("custom_probes", []):
+        if custom.get("enabled", True) is False:
+            continue
+        document = probe_document(custom)
+        prompts = document.get("exact_prompts_and_hashes") or {}
+        developer = str(prompts.get("developer_prompt") or "")
+        user = str(prompts.get("user_prompt") or "")
+        messages = ([{"role": "developer", "content": developer}] if developer else []) + [{"role": "user", "content": user}]
+        artifact = document.get("baseline_artifact") or {}
+        probe_id = str((document.get("probe_identity") or {}).get("probe_id") or "")
+        available = set((((artifact.get("raw_counts") or {}).get(probe_id) or {}).get("profiles") or {}).keys())
+        if not available:
+            available.update((document.get("trusted_counts_by_model") or {}).keys())
+        applicable = [profile for profile in profiles if profile in available]
+        multiplier = (
+            float(custom.get("runtime_requests", 10))
+            if config["mode"] == "single"
+            else float(config.get("slots_per_cycle", 1)) * float(custom.get("probability_percent", 100)) / 100.0
+        )
+        add(messages, applicable, multiplier)
+    total_tokens = totals["short_request_input_tokens"] + totals["native_base_input_tokens"] + totals["fixed_32k_input_tokens"]
+    result: dict[str, Any] = {
+        **{key: (int(value) if config["mode"] == "single" else round(value, 3)) for key, value in totals.items()},
+        "approximate_input_tokens_total": int(math.ceil(total_tokens)) if config["mode"] == "single" else round(total_tokens, 3),
+        "estimate_method": "UTF-8字节/3 + 每条消息8；Native基础取原始模板正文；固定32K每条加33792",
+        "estimate_disclaimer_cn": "仅用于比较档位消耗，不是上游账单精确值。",
+        "continuous": config["mode"] == "continuous",
+    }
+    if config["mode"] == "continuous":
+        result["expected_requests_per_cycle"] = result.pop("total_requests")
+        result["expected_fixed_32k_requests_per_cycle"] = result.pop("fixed_32k_requests")
+        result["expected_input_tokens_per_cycle"] = result.pop("approximate_input_tokens_total")
+    return result
+
+
 def custom_changes(config: dict[str, Any], base_preset: str | None = None) -> list[str]:
     normalized = normalize_config(config)
     base_name = base_preset or normalized.get("base_preset") or "low"
@@ -438,6 +553,7 @@ __all__ = [
     "config_hash",
     "custom_changes",
     "estimate_single_requests",
+    "estimate_plan",
     "get_preset",
     "normalize_config",
     "preset_catalog",
