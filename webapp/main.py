@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager, suppress
 import hashlib
 import hmac
 import ipaddress
@@ -33,6 +34,8 @@ REPORT_DIR = Path(os.getenv("REPORT_DIR", PROJECT_DIR / "reports")).resolve()
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 RETENTION_ROOT = REPORT_DIR / "retention"
 DOWNLOAD_ROOT = REPORT_DIR / ".downloads"
+RETENTION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+RETENTION_CLEANUP_INTERVAL_SECONDS = 60 * 60
 APP_VERSION = (PROJECT_DIR / "VERSION").read_text(encoding="utf-8").strip()
 BROWSER_SECRET = os.getenv("APP_BROWSER_SECRET", "")
 if len(BROWSER_SECRET) < 32:
@@ -40,7 +43,25 @@ if len(BROWSER_SECRET) < 32:
 
 BROWSER_COOKIE = "gpt56_browser"
 BROWSER_COOKIE_MAX_AGE = 365 * 24 * 60 * 60
-app = FastAPI(title="GPT-5.6 Detector", docs_url=None, redoc_url=None)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> Any:
+    await asyncio.to_thread(
+        cleanup_expired_retention, set(manager.active_ids.values())
+    )
+    cleanup_task = asyncio.create_task(retention_cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cleanup_task
+
+
+app = FastAPI(
+    title="GPT-5.6 Detector", docs_url=None, redoc_url=None, lifespan=lifespan
+)
 
 
 def sign_browser_id(browser_id: str) -> str:
@@ -105,6 +126,31 @@ def metadata_path_for(report_path: Path) -> Path:
 
 def retention_directory_for(job_id: str) -> Path:
     return RETENTION_ROOT / job_id
+
+
+def cleanup_expired_retention(
+    active_job_ids: set[str] | None = None, *, now_timestamp: float | None = None
+) -> list[str]:
+    if not RETENTION_ROOT.is_dir():
+        return []
+    cutoff = (
+        datetime.now(timezone.utc).timestamp()
+        if now_timestamp is None
+        else now_timestamp
+    ) - RETENTION_MAX_AGE_SECONDS
+    active = active_job_ids or set()
+    removed: list[str] = []
+    for directory in RETENTION_ROOT.iterdir():
+        if not directory.is_dir() or directory.is_symlink() or directory.name in active:
+            continue
+        try:
+            if directory.stat().st_mtime >= cutoff:
+                continue
+            shutil.rmtree(directory)
+            removed.append(directory.name)
+        except OSError:
+            continue
+    return removed
 
 
 def retention_ready(job: "Job") -> bool:
@@ -463,6 +509,11 @@ class JobManager:
                     except OSError:
                         pass
                 shutil.rmtree(retention_directory_for(job.id), ignore_errors=True)
+            elif job.config.get("retention_enabled"):
+                retention_directory = retention_directory_for(job.id)
+                if retention_directory.is_dir():
+                    with suppress(OSError):
+                        retention_directory.touch()
             async with self.lock:
                 if self.active_ids.get(job.owner_id) == job.id:
                     self.active_ids.pop(job.owner_id, None)
@@ -480,6 +531,13 @@ class JobManager:
 
 
 manager = JobManager()
+
+
+async def retention_cleanup_loop() -> None:
+    while True:
+        await asyncio.sleep(RETENTION_CLEANUP_INTERVAL_SECONDS)
+        active_job_ids = set(manager.active_ids.values())
+        await asyncio.to_thread(cleanup_expired_retention, active_job_ids)
 
 
 def _outcome_label(outcome: Any) -> str:

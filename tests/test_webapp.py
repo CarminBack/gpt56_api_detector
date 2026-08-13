@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import time
 import zipfile
 from uuid import uuid4
 
@@ -27,6 +28,7 @@ from webapp.main import (
     app,
     build_retention_archive,
     browser_id_from_token,
+    cleanup_expired_retention,
     manager,
     mask_api_key,
     validate_public_https_url,
@@ -329,6 +331,70 @@ def test_retention_uses_server_managed_path_and_archive_is_downloadable(tmp_path
             archive.unlink(missing_ok=True)
     finally:
         shutil.rmtree(retention_path, ignore_errors=True)
+
+
+def test_retention_cleanup_removes_only_expired_inactive_directories(
+    tmp_path: Path, monkeypatch
+) -> None:
+    retention_root = tmp_path / "retention"
+    monkeypatch.setattr(main_module, "RETENTION_ROOT", retention_root)
+    now = time.time()
+    expired = retention_root / "expired"
+    boundary = retention_root / "boundary"
+    recent = retention_root / "recent"
+    active = retention_root / "active"
+    for directory in (expired, boundary, recent, active):
+        directory.mkdir(parents=True)
+        (directory / "record.jsonl").write_text("{}\n", encoding="utf-8")
+    os.utime(expired, (now - main_module.RETENTION_MAX_AGE_SECONDS - 1,) * 2)
+    os.utime(boundary, (now - main_module.RETENTION_MAX_AGE_SECONDS,) * 2)
+    os.utime(recent, (now - 60,) * 2)
+    os.utime(active, (now - main_module.RETENTION_MAX_AGE_SECONDS - 1,) * 2)
+    report = tmp_path / "expired.json"
+    report.write_text('{"combined_verdict":"safe"}', encoding="utf-8")
+
+    removed = cleanup_expired_retention({"active"}, now_timestamp=now)
+
+    assert removed == ["expired"]
+    assert not expired.exists()
+    assert boundary.is_dir()
+    assert recent.is_dir()
+    assert active.is_dir()
+    assert report.is_file()
+
+
+def test_completed_retention_age_starts_when_job_finishes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    job_manager = JobManager()
+    job = make_job("retention-finished", "a" * 32, status="queued")
+    job.config["retention_enabled"] = True
+    retention_path = tmp_path / job.id
+    retention_path.mkdir(parents=True)
+    old_timestamp = time.time() - main_module.RETENTION_MAX_AGE_SECONDS
+    os.utime(retention_path, (old_timestamp, old_timestamp))
+    monkeypatch.setattr(
+        main_module, "retention_directory_for", lambda _: retention_path
+    )
+
+    def fake_command(_: Job, output_path: Path) -> list[str]:
+        code = (
+            "from pathlib import Path; import json; "
+            f"p=Path({str(output_path)!r}); "
+            "p.write_text(json.dumps({'combined_verdict':'test'})); "
+            "p.with_suffix('.html').write_text('<html></html>')"
+        )
+        return [sys.executable, "-c", code]
+
+    monkeypatch.setattr(job_manager, "_command", fake_command)
+    asyncio.run(job_manager._run(job, {"candidate": "sk-test-secret"}))
+
+    assert job.status == "completed"
+    assert retention_path.stat().st_mtime > old_timestamp
+    job.report_json.unlink(missing_ok=True)
+    job.report_html.unlink(missing_ok=True)
+    job.report_json.with_suffix(".owner").unlink(missing_ok=True)
+    main_module.metadata_path_for(job.report_json).unlink(missing_ok=True)
 
 
 def test_raw_retention_omits_auth_headers_and_redacts_key(
